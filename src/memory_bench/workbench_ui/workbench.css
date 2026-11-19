@@ -37,9 +37,6 @@ input[type=checkbox], progress { accent-color: var(--accent); }
 .limit-row input[type=number] { min-width: 0; }
 .check { white-space: nowrap; display: flex; align-items: center; gap: 4px; }
 .hint { font-size: .85rem; margin-top: 6px; }
-.model-panel .model-editor { border: 0; margin: 0; padding: 7px 0; }
-.model-panel .model-editor + .model-editor { border-top: 1px solid var(--border); margin-top: 4px; padding-top: 10px; }
-.model-panel .model-editor legend { padding-inline: 0; }
 .model-name { margin: 4px 0 0; overflow-wrap: anywhere; }
 .model-settings { margin-top: 18px; padding-top: 13px; border-top: 1px solid var(--border); }
 .model-settings summary { cursor: pointer; font-weight: 650; }
@@ -90,7 +87,6 @@ ul { list-style: none; padding: 0; margin: 12px 0 0; }
 .connection-actions { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px; }
 .connection-actions button { font-size: .83rem; }
 
-.connection-panel.model-panel { margin-bottom: 16px; }
 .connection-panel legend { padding-inline: 5px; font-size: .86rem; font-weight: 650; }
 .connection-panel label[hidden] { display: none; }
 .run-target { overflow-wrap: anywhere; }

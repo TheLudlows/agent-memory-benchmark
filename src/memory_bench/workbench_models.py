@@ -32,12 +32,6 @@ class ModelInput(BaseModel):
     api_key: SecretStr | None = Field(default=None, max_length=4096)
 
 
-class RunModels(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-    answer: ModelInput | None = None
-    judge: ModelInput | None = None
-
-
 @dataclass(frozen=True)
 class ModelConfig:
     provider: str
@@ -117,7 +111,7 @@ class ModelSettings:
             }
         return services
 
-    def _select(self, role: Role, update: ModelInput) -> ModelConfig:
+    def _updated_config(self, role: Role, update: ModelInput) -> ModelConfig:
         current = self._get(role)
         provider = update.provider
         url = update.api_url.strip()
@@ -146,7 +140,7 @@ class ModelSettings:
 
     def save(self, role: Role, update: ModelInput) -> dict:
         with self.lock:
-            config = self._select(role, update)
+            config = self._updated_config(role, update)
             self._check_key(role, config)
             self._write({**self.saved, role: config})
             return self._public(role)
@@ -157,18 +151,16 @@ class ModelSettings:
                 self._write({name: config for name, config in self.saved.items() if name != role})
             return self._public(role)
 
-    def for_run(self, dataset: str, overrides: RunModels) -> tuple[dict, dict[str, str]]:
+    def for_run(self, dataset: str) -> tuple[dict, dict[str, str]]:
         metadata = {}
         env = {}
         with self.lock:
             for role in ROLES:
-                override = getattr(overrides, role)
-                config = self._select(role, override) if override else self._get(role)
+                config = self._get(role)
                 env[_worker_key(role)] = self._check_key(role, config)
                 fallback = (
                     DEFAULT_JUDGE_MODEL if role == "judge" and dataset == "beam" and config.provider == "gemini"
                     else REGISTRY[config.provider].DEFAULT_MODEL
                 )
-                metadata[role] = {**config.metadata(), "model": config.model or fallback,
-                                  "source": "override" if override else "global"}
+                metadata[role] = {**config.metadata(), "model": config.model or fallback}
         return metadata, env

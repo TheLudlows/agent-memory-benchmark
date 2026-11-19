@@ -23,7 +23,7 @@ let savingConnection = false;
 
 const modelRoles = { answer: "回答模型", judge: "评分模型" };
 const providerLabels = { gemini: "Gemini", openai: "OpenAI 兼容", groq: "Groq" };
-const modelEditors = { global: {}, run: {} };
+const modelEditors = {};
 const savingModels = new Set();
 
 async function api(path, options) {
@@ -113,8 +113,7 @@ function loadModelEditor(editor, provider = settings.models[editor.role].provide
   const config = settings.models[editor.role];
   const service = settings.model_services[provider];
   editor.provider.value = provider;
-  const fallback = editor.scope === "run" ? defaultModel(editor.role, provider) : service?.default_model;
-  editor.model.value = (provider === config.provider && config.model) || fallback || "";
+  editor.model.value = (provider === config.provider && config.model) || service?.default_model || "";
   editor.url.value = (provider === config.provider && config.api_url) || service?.api_url || "";
   editor.key.value = "";
   setError(editor.message.id, "");
@@ -140,14 +139,10 @@ function modelHasKey(role, input) {
 
 function updateModelEditor(editor) {
   const input = modelInput(editor);
-  const override = editor.scope === "run";
-  const editing = !override || editor.toggle.checked;
   const busy = savingModels.has(editor.role) || submitting;
-  editor.fields.hidden = !editing;
   editor.urlRow.hidden = input.provider !== "openai";
-  editor.toggle.disabled = busy;
-  for (const field of [editor.provider, editor.model, editor.key]) field.disabled = busy || !editing;
-  editor.url.disabled = busy || !editing || input.provider !== "openai";
+  for (const field of [editor.provider, editor.model, editor.key]) field.disabled = busy;
+  editor.url.disabled = busy || editor.urlRow.hidden;
   const hasKey = modelHasKey(editor.role, { ...input, api_key: null });
   editor.key.placeholder = hasKey ? "已配置，留空继续使用" : "填写模型 API Key";
   editor.reset.hidden = !settings.models[editor.role].saved;
@@ -157,7 +152,6 @@ function updateModelEditor(editor) {
   const config = settings.models[editor.role];
   const model = config.model || defaultModel(editor.role, config.provider);
   const label = providerLabels[config.provider];
-  editor.summary.hidden = editing && override;
   editor.summary.textContent = label && model
     ? `全局默认：${label} · ${model}${config.has_key ? "" : "（缺少 Key）"}`
     : "请选择提供方并保存默认模型。";
@@ -172,18 +166,6 @@ function modelInputError(editor, input) {
   return modelHasKey(editor.role, input) ? "" : `请填写${label}的 API Key。`;
 }
 
-function modelRunError() {
-  for (const [role, editor] of Object.entries(modelEditors.run)) {
-    if (editor.toggle.checked) {
-      const error = modelInputError(editor, modelInput(editor));
-      if (error) return error;
-    } else if (!settings.models[role].has_key) {
-      return `请在「全局模型设置」配置${modelRoles[role]}，或为本轮单独指定。`;
-    }
-  }
-  return "";
-}
-
 async function saveModel(editor, reset = false) {
   const { role } = editor;
   const input = modelInput(editor);
@@ -194,8 +176,6 @@ async function saveModel(editor, reset = false) {
     const request = reset ? {} : { headers: {"Content-Type": "application/json"}, body: JSON.stringify(input) };
     settings.models[role] = await api(`/models/${role}${reset ? "/reset" : ""}`, { method: "POST", ...request });
     loadModelEditor(editor);
-    const runEditor = modelEditors.run[role];
-    if (!runEditor.toggle.checked) loadModelEditor(runEditor);
     setError(editor.message.id, reset ? "已恢复 .env 默认配置。" : "已保存全局默认模型。");
   } catch (error) {
     setError(editor.message.id, error.message);
@@ -205,29 +185,23 @@ async function saveModel(editor, reset = false) {
   }
 }
 
-function createModelEditor(scope, role) {
+function createModelEditor(role) {
   const template = $("model-editor").content.cloneNode(true);
-  const editor = { scope, role };
+  const editor = { role };
   for (const part of template.querySelectorAll("[data-part]")) {
     const name = part.dataset.part;
-    part.id = `${scope}-${role}-${name}`;
+    part.id = `global-${role}-${name}`;
     const property = name.replace(/-([a-z])/g, (_, letter) => letter.toUpperCase());
     editor[property] = part;
   }
   for (const label of template.querySelectorAll("[data-for]")) label.htmlFor = editor[label.dataset.for].id;
   editor.title.textContent = modelRoles[role];
-  editor.toggleRow.hidden = scope === "global";
-  editor.actions.hidden = scope === "run";
   const providers = Object.keys(settings.model_services).map((provider) => new Option(providerLabels[provider], provider));
   editor.provider.replaceChildren(...providers);
-  $(`${scope}-models`).append(template);
+  $("global-models").append(template);
   loadModelEditor(editor);
   editor.provider.addEventListener("change", () => {
     loadModelEditor(editor, editor.provider.value);
-    updateForm();
-  });
-  editor.toggle.addEventListener("change", () => {
-    loadModelEditor(editor);
     updateForm();
   });
   for (const input of [editor.model, editor.url, editor.key]) {
@@ -238,7 +212,7 @@ function createModelEditor(scope, role) {
   }
   editor.save.addEventListener("click", () => saveModel(editor));
   editor.reset.addEventListener("click", () => saveModel(editor, true));
-  modelEditors[scope][role] = editor;
+  modelEditors[role] = editor;
 }
 
 function updateForm() {
@@ -259,10 +233,10 @@ function updateForm() {
   $("connection-key").placeholder = config.key_optional ? "选填" : "请输入本轮 API Key";
   const usingSaved = $("connection-reuse").checked;
   const splitError = settings.split_errors?.[$("dataset").value]?.[$("split").value];
-  for (const editors of Object.values(modelEditors)) {
-    for (const editor of Object.values(editors)) updateModelEditor(editor);
-  }
-  const modelError = modelRunError();
+  for (const editor of Object.values(modelEditors)) updateModelEditor(editor);
+  const missing = Object.keys(modelRoles).filter((role) => !settings.models[role].has_key);
+  const modelError = missing.length
+    ? `请在「全局模型设置」配置${missing.map((role) => modelRoles[role]).join("和")}。` : "";
   const ready = $("evaluation-name").value.trim() && connection.api_url &&
     (config.key_optional || connection.api_key || usingSaved) &&
     (backend !== "contextbase" || connection.bank_id || (sameUrl && config.has_bank_mapping));
@@ -315,9 +289,7 @@ function storedModelLabel(job, role) {
 }
 
 function storedModelDetail(job, role) {
-  const label = storedModelLabel(job, role) || job.models?.[role]?.provider || "—";
-  const source = job.models?.[role]?.source;
-  return `${label}${source === "override" ? "（本轮指定）" : ""}`;
+  return storedModelLabel(job, role) || job.models?.[role]?.provider || "—";
 }
 
 function comparisonWarning(runs) {
@@ -557,10 +529,6 @@ $("run-form").addEventListener("submit", async (event) => {
   if ($("start").disabled) return;
   setError("form-error", "");
   const connection = { ...connectionInput(), use_saved_key: $("connection-reuse").checked };
-  const models = {};
-  for (const [role, editor] of Object.entries(modelEditors.run)) {
-    if (editor.toggle.checked) models[role] = modelInput(editor);
-  }
   submitting = true;
   updateForm();
   try {
@@ -570,7 +538,6 @@ $("run-form").addEventListener("submit", async (event) => {
       body: JSON.stringify({
         name: $("evaluation-name").value.trim(),
         connection,
-        models,
         dataset: $("dataset").value,
         split: $("split").value,
         backend: $("backend").value,
@@ -581,10 +548,6 @@ $("run-form").addEventListener("submit", async (event) => {
     historyOffset = 0;
     $("evaluation-name").value = "";
     clearRunKey();
-    for (const editor of Object.values(modelEditors.run)) {
-      editor.toggle.checked = false;
-      loadModelEditor(editor);
-    }
     await refresh();
   } catch (error) {
     setError("form-error", error.message);
@@ -632,10 +595,7 @@ async function init() {
     options("dataset", Object.keys(settings.datasets).map((key) => [key, names[key]]));
     options("backend", Object.entries(settings.backends).map(([key, value]) => [key, value.label]));
     options("split", settings.datasets[$("dataset").value].map((item) => [item, item]));
-    for (const role of Object.keys(modelRoles)) {
-      createModelEditor("run", role);
-      createModelEditor("global", role);
-    }
+    for (const role of Object.keys(modelRoles)) createModelEditor(role);
     $("model-settings").hidden = false;
     loadConnection();
     await poll();

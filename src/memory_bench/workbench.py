@@ -10,6 +10,7 @@ from datetime import datetime, timezone
 from hashlib import sha256
 from pathlib import Path
 from threading import Lock, Thread
+from time import monotonic
 from typing import Annotated, Literal
 from uuid import uuid4
 
@@ -27,7 +28,7 @@ from .dataset.beam import BEAMDataset, DEFAULT_JUDGE_MODEL, SPLITS as BEAM_SPLIT
 from .dataset.locomo import SPLITS as LOCOMO_SPLITS
 from .dataset.longmemeval import SPLITS as LONGMEMEVAL_SPLITS
 from .workbench_connections import BackendId, Connections, ConnectionUpdate, RunConnection
-from .workbench_models import ModelInput, ModelSettings, Role
+from .workbench_models import JudgeProbeExit, ModelInput, ModelSettings, Role
 
 DATASETS = {
     "locomo": LOCOMO_SPLITS,
@@ -43,6 +44,7 @@ STANDARD_QUERY_COUNTS = {
 }
 RUN_ID = re.compile(r"[0-9a-f]{32}")
 SCORING_INCOMPLETE_EXIT_CODE = 2
+JUDGE_PROBE_TIMEOUT = 20
 ASSETS = Path(__file__).with_name("workbench_ui")
 
 
@@ -328,6 +330,37 @@ def create_app(output_dir: Path) -> FastAPI:
     @app.post("/api/models/{role}/reset")
     def reset_model(role: Role):
         return manager.models.reset(role)
+
+    @app.post("/api/models/judge/test")
+    def test_judge_model(update: ModelInput):
+        try:
+            model, model_env = manager.models.for_judge_probe(update)
+        except ValueError as exc:
+            raise HTTPException(422, str(exc)) from exc
+        env = {**os.environ, **model_env}
+        # Evaluation debugging can log the provider's raw response. Keep probes out of that log.
+        env.pop("AMB_BAD_JSON_LOG", None)
+        started = monotonic()
+        try:
+            result = subprocess.run(
+                [sys.executable, "-m", "memory_bench.workbench_worker", "--probe-judge"],
+                input=json.dumps(model), encoding="utf-8", env=env, timeout=JUDGE_PROBE_TIMEOUT,
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            )
+        except subprocess.TimeoutExpired:
+            raise HTTPException(504, f"评分模型测试在 {JUDGE_PROBE_TIMEOUT} 秒内未完成。请检查后台网络或服务状态。") from None
+        except OSError:
+            raise HTTPException(500, "后台无法启动评分模型测试。") from None
+
+        if result.returncode:
+            messages = {
+                JudgeProbeExit.INVALID_SCORE: "模型返回的格式不正确，或评分结果与预期不符。",
+                JudgeProbeExit.AUTH_FAILED: "评分模型鉴权失败，请检查 API Key 和访问权限。",
+                JudgeProbeExit.NOT_FOUND: "未找到评分模型或 API 路径，请检查模型 ID 和地址。",
+                JudgeProbeExit.REQUEST_REJECTED: "评分请求被拒绝，请检查模型配置和结构化输出支持。",
+            }
+            raise HTTPException(502, messages.get(result.returncode, "后台调用评分模型失败，请检查 API 地址和服务状态。"))
+        return {"model": f"{model['provider']}:{model['model']}", "elapsed_ms": round((monotonic() - started) * 1000)}
 
     @app.get("/api/runs")
     def runs(limit: Annotated[int, Query(ge=1, le=100)] = 30, offset: Annotated[int, Query(ge=0)] = 0):

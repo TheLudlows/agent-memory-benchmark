@@ -26,6 +26,7 @@ const modelRoles = { answer: "回答模型", judge: "评分模型" };
 const providerLabels = { gemini: "Gemini", openai: "OpenAI 兼容", groq: "Groq" };
 const modelEditors = {};
 const savingModels = new Set();
+let testingJudge = false;
 
 async function api(path, options) {
   const response = await fetch(`/api${path}`, options);
@@ -161,7 +162,8 @@ function modelHasKey(role, input) {
 
 function updateModelEditor(editor) {
   const input = modelInput(editor);
-  const busy = savingModels.has(editor.role) || submitting;
+  const testing = editor.role === "judge" && testingJudge;
+  const busy = savingModels.has(editor.role) || submitting || testing;
   editor.urlRow.hidden = input.provider !== "openai";
   for (const field of [editor.provider, editor.model, editor.key]) field.disabled = busy;
   editor.url.disabled = busy || editor.urlRow.hidden;
@@ -169,7 +171,10 @@ function updateModelEditor(editor) {
   editor.key.placeholder = hasKey ? "已配置，留空继续使用" : "填写模型 API Key";
   editor.reset.hidden = !settings.models[editor.role].saved;
   editor.reset.disabled = busy;
-  editor.save.disabled = busy || Boolean(modelInputError(editor, input));
+  const invalid = Boolean(modelInputError(editor, input));
+  editor.save.disabled = busy || invalid;
+  editor.test.disabled = busy || invalid;
+  editor.test.textContent = testing ? "测试中…" : "测试评分模型";
 
   const config = settings.models[editor.role];
   const model = config.model || defaultModel(editor.role, config.provider);
@@ -207,6 +212,27 @@ async function saveModel(editor, reset = false) {
   }
 }
 
+async function testJudgeModel(editor) {
+  const input = modelInput(editor);
+  if (editor.test.disabled || modelInputError(editor, input)) return;
+  testingJudge = true;
+  setError(editor.message.id, "正在由后台测试评分模型…");
+  updateForm();
+  try {
+    const result = await api("/models/judge/test", {
+      method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify(input),
+    });
+    setError(editor.message.id, `评分测试通过 · ${result.model} · ${(result.elapsed_ms / 1000).toFixed(1)} 秒`);
+  } catch (error) {
+    setError(editor.message.id, `评分测试失败。${error.message}`);
+  } finally {
+    testingJudge = false;
+    updateForm();
+  }
+}
+
 function createModelEditor(role) {
   const template = $("model-editor").content.cloneNode(true);
   const editor = { role };
@@ -231,6 +257,10 @@ function createModelEditor(role) {
       setError(editor.message.id, "");
       updateForm();
     });
+  }
+  if (role === "judge") {
+    editor.test.hidden = false;
+    editor.test.addEventListener("click", () => testJudgeModel(editor));
   }
   editor.save.addEventListener("click", () => saveModel(editor));
   editor.reset.addEventListener("click", () => saveModel(editor, true));

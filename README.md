@@ -136,6 +136,8 @@ Docker Compose 使用独立的 `amb-workbench-config` 卷。升级后，旧的 `
 
 展开「全局模型设置」，分别配置回答模型和评分模型。回答模型根据检索结果生成答案，评分模型根据参考答案或评分规则打分。选择 Gemini、OpenAI 兼容或 Groq，填写模型 ID 和 Key。OpenAI 兼容服务还需填写 API 地址及前缀（通常是 `/v1`），并支持 Chat Completions 的 JSON Schema 输出。
 
+点击「测试评分模型」，评测台后台会使用当前填写的配置评分一道固定样题并检查结果。可以在保存前测试。留空 Key 时，后台按同样的规则复用已有 Key。测试最多等待 20 秒，结果显示在该模型设置下方。
+
 每轮评测在启动时读取全局模型设置，运行详情记录当时实际使用的模型。修改设置后，下一轮评测使用新配置。编辑全局模型时，留空 Key 可复用同一提供方和 API 地址已配置的 Key。全局配置在重启后保留，并与默认连接一起存放在私有配置目录。
 
 没有保存网页默认配置时，系统使用 `.env` 中的 `OMB_ANSWER_LLM`、`OMB_ANSWER_MODEL`、`OMB_JUDGE_LLM`、`OMB_JUDGE_MODEL` 和相应提供方的 Key。页面可随时恢复这些默认值。ContextBase 和 Hindsight 在各自服务内配置写入和检索使用的模型。

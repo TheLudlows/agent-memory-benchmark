@@ -3,6 +3,7 @@
 import json
 import os
 from dataclasses import asdict, dataclass, field, replace
+from enum import IntEnum
 from pathlib import Path
 from threading import Lock
 from typing import Annotated, Literal
@@ -22,6 +23,14 @@ LLM_KEYS = {
     "groq": ("GROQ_API_KEY",),
 }
 OPENAI_URL = "https://api.openai.com/v1"
+
+
+class JudgeProbeExit(IntEnum):
+    INVALID_SCORE = 10
+    AUTH_FAILED = 11
+    NOT_FOUND = 12
+    REQUEST_REJECTED = 13
+    REQUEST_FAILED = 14
 
 
 class ModelInput(BaseModel):
@@ -150,6 +159,12 @@ class ModelSettings:
             if role in self.saved:
                 self._write({name: config for name, config in self.saved.items() if name != role})
             return self._public(role)
+
+    def for_judge_probe(self, update: ModelInput) -> tuple[dict, dict[str, str]]:
+        with self.lock:
+            config = self._updated_config("judge", update)
+            key = self._check_key("judge", config)
+        return config.metadata(), {_worker_key("judge"): key}
 
     def for_run(self, dataset: str) -> tuple[dict, dict[str, str]]:
         metadata = {}

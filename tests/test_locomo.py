@@ -1,7 +1,10 @@
+import socket
+
 from memory_bench.dataset import locomo_fixed
 from memory_bench.dataset.locomo import LoComoDataset
 from memory_bench.dataset.locomo_fixed import LoComoFixedDataset
 from memory_bench.memory.hindsight import _HindsightBase
+from memory_bench.utils import _enc, count_tokens
 
 
 def _item() -> dict:
@@ -39,6 +42,21 @@ def test_every_exclusion_names_a_real_question_and_a_reason():
     for query_id, reason in locomo_fixed.load_exclusions().items():
         assert query_id in ids, query_id
         assert reason.strip(), query_id
+
+
+def test_bundled_locomo_and_tokenizer_load_without_network(monkeypatch, tmp_path):
+    def deny_network(*args, **kwargs):
+        raise AssertionError("Bundled evaluation assets must load without network access")
+
+    monkeypatch.delenv("LOCOMO_DATA_PATH", raising=False)
+    monkeypatch.setenv("TIKTOKEN_CACHE_DIR", str(tmp_path / "empty-cache"))
+    monkeypatch.setattr(socket.socket, "connect", deny_network)
+    _enc.cache_clear()
+
+    dataset = LoComoDataset()
+    assert len(dataset.load_queries("locomo10")) == 1540
+    assert len(dataset.load_documents("locomo10")) == 272
+    assert count_tokens("LoCoMo 中文") == 5
 
 
 def test_reflect_gets_the_question_date_and_the_answer_rules():

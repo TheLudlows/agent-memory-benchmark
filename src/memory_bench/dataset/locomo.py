@@ -4,8 +4,7 @@ LoComo dataset (https://github.com/snap-research/locomo).
 A long-term conversation memory benchmark with 10 multi-session conversations
 and open-ended QA pairs over personal conversation history.
 
-Data is auto-downloaded from the public GitHub repo on first use and cached
-locally. You can also set LOCOMO_DATA_PATH to point at a local copy.
+The official data is bundled. Set LOCOMO_DATA_PATH to use another local copy.
 
 Structure
 ---------
@@ -24,20 +23,18 @@ Categories (query-level, by QA category int):
   2 → temporal     4 → open-domain    5 → adversarial
 """
 import json
-import urllib.request
+import lzma
+import os
 from datetime import datetime, timezone
 from pathlib import Path
 
 from rich.console import Console
 from rich.table import Table
 
-from ._cache import dataset_cache_dir, staging_file
 from .base import Dataset
 from ..models import Document, Query
 
-_DATA_URL = (
-    "https://raw.githubusercontent.com/snap-research/locomo/main/data/locomo10.json"
-)
+_BUNDLED_DATA_PATH = Path(__file__).resolve().parents[1] / "assets" / "locomo" / "locomo10.json.xz"
 
 SPLITS = ["locomo10"]
 
@@ -67,8 +64,7 @@ class LoComoDataset(Dataset):
     """
     LoComo benchmark — long-term multi-session conversation memory.
 
-    Data is auto-downloaded from the snap-research/locomo GitHub repo on first
-    use. Set LOCOMO_DATA_PATH to point at a local JSON file to skip download.
+    Set LOCOMO_DATA_PATH to override the bundled data with a local JSON file.
     """
 
     name = "locomo"
@@ -82,7 +78,6 @@ class LoComoDataset(Dataset):
     ]
 
     def __init__(self) -> None:
-        import os
         env = os.environ.get("LOCOMO_DATA_PATH")
         self._local_path: Path | None = Path(env) if env else None
 
@@ -90,18 +85,10 @@ class LoComoDataset(Dataset):
     # Internal helpers
     # ------------------------------------------------------------------
 
-    def _data_path(self) -> Path:
-        if self._local_path:
-            return self._local_path
-        cache = dataset_cache_dir("locomo")
-        path = cache / "locomo10.json"
-        if not path.exists():
-            with staging_file(path) as temporary:
-                urllib.request.urlretrieve(_DATA_URL, temporary)
-        return path
-
     def _load_raw(self) -> list[dict]:
-        with open(self._data_path(), encoding="utf-8") as f:
+        path = self._local_path or _BUNDLED_DATA_PATH
+        open_data = lzma.open if path.suffix == ".xz" else open
+        with open_data(path, "rt", encoding="utf-8") as f:
             return json.load(f)
 
     @staticmethod

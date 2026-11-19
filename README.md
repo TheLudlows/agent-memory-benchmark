@@ -26,7 +26,7 @@ docker compose run --rm --build amb run --dataset locomo --split locomo10 --memo
 
 PR 的 GitHub Actions 构建成功后，也可下载 linux/amd64 镜像产物 `amb-locomo-linux-amd64`。解压下载的 ZIP，执行 `docker load -i amb-locomo-linux-amd64.tar.gz`，然后在仓库目录用 `docker compose run --rm amb` 启动。
 
-主分支镜像工作流成功后，亦可在仓库的 Packages 页面获取 `ghcr.io/theludlows/agent-memory-benchmark:latest` 或对应的 `sha-<commit>` 标签。镜像内 LoCoMo 的来源是 [snap-research/locomo](https://github.com/snap-research/locomo/tree/3eb6f2c585f5e1699204e3c3bdf7adc5c28cb376)，授权文件位于 `/opt/locomo/LICENSE.txt`。
+主分支镜像工作流成功后，亦可在仓库的 Packages 页面获取 `ghcr.io/theludlows/agent-memory-benchmark:latest` 或对应的 `sha-<commit>` 标签。LoCoMo 原始数据来自 [snap-research/locomo](https://github.com/snap-research/locomo/tree/3eb6f2c585f5e1699204e3c3bdf7adc5c28cb376)，按 CC BY-NC 4.0 授权。`cl100k_base` 词表和分词设置来自 [tiktoken 0.12.0](https://github.com/openai/tiktoken/tree/0.12.0)。两者的原始许可文本随文件保存在 `src/memory_bench/assets/` 的对应目录中。
 
 ## The problem with existing benchmarks
 
@@ -143,9 +143,10 @@ Docker Compose 使用独立的 `amb-workbench-config` 卷。升级后，旧的 `
 
 没有保存网页默认配置时，系统使用 `.env` 中的 `OMB_ANSWER_LLM`、`OMB_ANSWER_MODEL`、`OMB_JUDGE_LLM`、`OMB_JUDGE_MODEL` 和相应提供方的 Key。页面可随时恢复这些默认值。ContextBase 和 Hindsight 在各自服务内配置写入和检索使用的模型。
 
-可选 split 为 LoCoMo `locomo10`、BEAM `100k / 500k / 1m / 10m`、LongMemEval `s`。Compose 镜像
-内置 LoCoMo，首次运行其他数据集时会下载数据。直接运行时可通过 `LOCOMO_DATA_PATH`、
-`LONGMEMEVAL_DATA_PATH` 指定本地数据。BEAM 按 split 使用 `BEAM_100K_DATA_PATH`、
+可选 split 为 LoCoMo `locomo10`、BEAM `100k / 500k / 1m / 10m`、LongMemEval `s`。代码库和镜像均
+内置 LoCoMo 原始数据和 `cl100k_base` 词表。安装好运行依赖后，首次运行 LoCoMo 也会从本地读取这两个文件。
+离线环境下，运行评测的机器仍需能访问所选记忆后端和模型端点。可用 `LOCOMO_DATA_PATH` 覆盖内置数据。
+其他数据集可通过环境变量指定本地文件。LongMemEval 使用 `LONGMEMEVAL_DATA_PATH`，BEAM 按 split 使用 `BEAM_100K_DATA_PATH`、
 `BEAM_500K_DATA_PATH`、`BEAM_1M_DATA_PATH` 或 `BEAM_10M_DATA_PATH`。如果评测台继续使用
 `BEAM_DATA_PATH`，需要同时用 `BEAM_DATA_SPLIT` 指明文件所属的标准 split。没有指定本地文件的 split
 会使用对应的官方数据。比较不同后端时，请使用相同的 split、题数和回答及评分模型。
@@ -210,8 +211,7 @@ get a new ingestion ID. Use empty Banks for a cold-ingest measurement.
 
 For a Hindsight comparison, keep the dataset, question IDs, answer and judge models,
 Recall token budgets, memory types, observation configuration, and concurrency the
-same on both sides. Set `LOCOMO_DATA_PATH` to a local copy of `locomo10.json` to pin
-the input file.
+same on both sides. Both runs use the same bundled LoCoMo snapshot by default.
 
 ## Results
 

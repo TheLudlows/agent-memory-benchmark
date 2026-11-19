@@ -7,8 +7,10 @@ import subprocess
 import sys
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
+from hashlib import sha256
 from pathlib import Path
 from threading import Lock, Thread
+from time import monotonic
 from typing import Annotated, Literal
 from uuid import uuid4
 
@@ -21,32 +23,48 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, Field, StringConstraints, model_validator
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
-from .dataset.beam import SPLITS as BEAM_SPLITS, local_data_path as beam_local_data_path
+from .dataset import get_dataset
+from .dataset.beam import BEAMDataset, DEFAULT_JUDGE_MODEL, SPLITS as BEAM_SPLITS, local_data_path as beam_local_data_path
+from .dataset.lifebench_v2 import SPLITS as LIFEBENCH_V2_SPLITS, TOTAL_QUERIES as LIFEBENCH_V2_QUERIES
 from .dataset.locomo import SPLITS as LOCOMO_SPLITS
 from .dataset.longmemeval import SPLITS as LONGMEMEVAL_SPLITS
-from .workbench_connections import BackendId, Connections, ConnectionUpdate, RunConnection
+from .dataset.precisionmembench import SPLITS as PRECISIONMEMBENCH_SPLITS, TOTAL_QUERIES as PRECISIONMEMBENCH_QUERIES
+from .workbench_connections import BackendId, Connections, RunConnection
+from .workbench_models import ROLES, ModelInput, ModelProbeExit, ModelProbeInput, ModelSettings, Role
 
 DATASETS = {
     "locomo": LOCOMO_SPLITS,
     "beam": BEAM_SPLITS,
     "longmemeval": LONGMEMEVAL_SPLITS,
+    "lifebench-v2": LIFEBENCH_V2_SPLITS,
+    "precisionmembench": PRECISIONMEMBENCH_SPLITS,
 }
-LLM_KEYS = {
-    "gemini": ("GEMINI_API_KEY", "GOOGLE_API_KEY"),
-    "openai": ("OPENAI_API_KEY",),
-    "groq": ("GROQ_API_KEY",),
+RETRIEVAL_DATASETS = {"precisionmembench"}
+# Counts from data/<dataset>/<split>/stats.json.gz. Previews of the standard
+# splits should be available before the evaluation downloads their corpora.
+STANDARD_QUERY_COUNTS = {
+    "locomo": {"locomo10": 1540},
+    "beam": {"100k": 400, "500k": 700, "1m": 700, "10m": 200},
+    "longmemeval": {"s": 500},
+    "lifebench-v2": {"zh": LIFEBENCH_V2_QUERIES},
+    "precisionmembench": {"single-turn": PRECISIONMEMBENCH_QUERIES},
 }
 RUN_ID = re.compile(r"[0-9a-f]{32}")
 SCORING_INCOMPLETE_EXIT_CODE = 2
+MODEL_PROBE_TIMEOUT = 20
 ASSETS = Path(__file__).with_name("workbench_ui")
 
 
 class RunSelection(BaseModel):
     model_config = ConfigDict(extra="forbid")
-    dataset: Literal["locomo", "beam", "longmemeval"]
+    dataset: Literal["locomo", "beam", "longmemeval", "lifebench-v2", "precisionmembench"]
     split: str
     backend: BackendId
     query_limit: int | None = Field(default=5, ge=1, strict=True)
+
+    @property
+    def mode(self) -> str:
+        return "retrieval" if self.dataset in RETRIEVAL_DATASETS else "rag"
 
     @model_validator(mode="after")
     def check_split(self):
@@ -69,28 +87,6 @@ def _dataset_error(dataset: str, split: str) -> str | None:
     return None
 
 
-def _configured(*keys: str) -> bool:
-    return any(os.environ.get(key, "").strip() for key in keys)
-
-
-def _models() -> dict:
-    return {
-        role.lower(): {"provider": os.getenv(f"OMB_{role}_LLM", "gemini"), "model": os.getenv(f"OMB_{role}_MODEL")}
-        for role in ("ANSWER", "JUDGE")
-    }
-
-
-def _missing_models() -> list[str]:
-    missing = []
-    for role, config in _models().items():
-        keys = LLM_KEYS.get(config["provider"])
-        if not keys:
-            missing.append(f"OMB_{role.upper()}_LLM (gemini / openai / groq)")
-        elif not _configured(*keys):
-            missing.append(" / ".join(keys))
-    return list(dict.fromkeys(missing))
-
-
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
@@ -108,11 +104,24 @@ def _read_json(path: Path) -> dict:
         return {}
 
 
+def _settings_path(output_dir: Path, filename: str) -> Path:
+    configured_dir = os.environ.get("AMB_WORKBENCH_CONFIG_DIR")
+    root = Path(configured_dir).expanduser() if configured_dir else Path.home() / ".config" / "amb" / "workbench"
+    key = sha256(os.fsencode(output_dir)).hexdigest()
+    path = (root / key / filename).resolve()
+    if path.is_relative_to(output_dir):
+        raise ValueError("AMB_WORKBENCH_CONFIG_DIR must be outside the Workbench results directory.")
+    return path
+
+
 class RunManager:
     def __init__(self, root: Path):
         self.root = root.resolve()
         self.root.mkdir(parents=True, exist_ok=True)
-        self.connections = Connections(self.root / ".connections.json")
+        self.connections = Connections(
+            _settings_path(self.root, "connections.json"), legacy_path=self.root / ".connections.json",
+        )
+        self.models = ModelSettings(_settings_path(self.root, "models.json"))
         self.lock = Lock()
         self.active: tuple[str, subprocess.Popen] | None = None
         self.cancelling = False
@@ -124,15 +133,20 @@ class RunManager:
     def start(self, selection: RunRequest) -> dict:
         if error := _dataset_error(selection.dataset, selection.split):
             raise HTTPException(422, error)
-        try:
-            connection = self.connections.for_run(selection.backend, selection.connection)
-        except ValueError as exc:
-            raise HTTPException(422, str(exc)) from exc
-        if missing := _missing_models():
-            raise HTTPException(422, "请先在服务器的 .env 中配置 " + "、".join(missing))
         with self.lock:
             if self.active:
                 raise HTTPException(409, "已有评测正在运行。")
+            try:
+                connection = self.connections.for_run(selection.backend, selection.connection)
+                models, model_env = {}, {}
+                if selection.mode == "rag":
+                    models, model_env = self.models.for_run(selection.dataset)
+            except ValueError as exc:
+                raise HTTPException(422, str(exc)) from exc
+            try:
+                backend_config = self.connections.remember(selection.backend, connection)
+            except OSError as exc:
+                raise HTTPException(500, "无法保存本轮连接，请检查配置目录。") from exc
             run_id = uuid4().hex
             directory = self.root / run_id
             directory.mkdir(mode=0o700)
@@ -141,16 +155,15 @@ class RunManager:
                 "name": selection.name,
                 "selection": selection.model_dump(exclude={"name", "connection"}),
                 "target": {"api_url": connection.api_url, "bank_id": connection.bank_id},
-                "models": _models(),
+                "models": models,
                 "status": "running",
                 "started_at": _now(),
             }
             write_json(directory / "run.json", job)
-            env = {**os.environ, **connection.worker_env(selection.backend), "NO_COLOR": "1", "PYTHONUNBUFFERED": "1"}
-            env.setdefault("OMB_ANSWER_LLM", "gemini")
-            env.setdefault("OMB_JUDGE_LLM", "gemini")
-            if env.get("GEMINI_API_KEY"):
-                env["GOOGLE_API_KEY"] = env["GEMINI_API_KEY"]
+            env = {
+                **os.environ, **connection.worker_env(selection.backend), **model_env,
+                "NO_COLOR": "1", "PYTHONUNBUFFERED": "1",
+            }
             try:
                 process = subprocess.Popen(
                     [sys.executable, "-m", "memory_bench.workbench_worker", str(directory)],
@@ -166,7 +179,7 @@ class RunManager:
                 key=len, reverse=True,
             )
             Thread(target=self._monitor, args=(job, process, secrets), daemon=True).start()
-            return job
+            return {**job, "backend_config": backend_config}
 
     def _monitor(self, job: dict, process: subprocess.Popen, secrets: list[str]) -> None:
         directory = self.root / job["id"]
@@ -228,8 +241,8 @@ class RunManager:
 
 
 def _result_path(directory: Path, job: dict) -> Path:
-    selection = job["selection"]
-    return directory / "results" / selection["dataset"] / f"web-{job['id']}" / "rag" / f"{selection['split']}.json"
+    selection = RunSelection.model_validate(job["selection"])
+    return directory / "results" / selection.dataset / f"web-{job['id']}" / selection.mode / f"{selection.split}.json"
 
 
 async def _stream_result(path: Path):
@@ -273,9 +286,8 @@ def create_app(output_dir: Path) -> FastAPI:
     async def validation_error(request: Request, exc: RequestValidationError):
         if request.method == "POST" and request.url.path == "/api/runs":
             return JSONResponse({"detail": "评测配置无效，请检查名称、类型和本轮连接。"}, status_code=422)
-        if request.url.path.startswith("/api/connections/"):
-            # FastAPI normally returns the invalid input, which may contain a key.
-            return JSONResponse({"detail": "后端配置格式无效，请检查输入。"}, status_code=422)
+        if request.url.path.startswith("/api/models/"):
+            return JSONResponse({"detail": "模型配置格式无效，请检查提供方、模型 ID、地址和 Key。"}, status_code=422)
         return await request_validation_exception_handler(request, exc)
 
     @app.get("/")
@@ -286,24 +298,80 @@ def create_app(output_dir: Path) -> FastAPI:
     def config():
         return {
             "datasets": DATASETS,
+            "retrieval_datasets": sorted(RETRIEVAL_DATASETS),
             "split_errors": {"beam": {
                 split: error for split in BEAM_SPLITS if (error := _dataset_error("beam", split))
             }},
             "backends": manager.connections.public(),
-            "models": _models(),
-            "missing_models": _missing_models(),
+            "models": manager.models.public(),
+            "model_services": manager.models.services(),
+            "beam_default_judge_model": DEFAULT_JUDGE_MODEL,
         }
 
-    @app.post("/api/connections/{backend}")
-    def save_connection(backend: BackendId, update: ConnectionUpdate):
+    @app.get("/api/datasets/{dataset}/{split}/query-count")
+    def dataset_query_count(dataset: str, split: str):
+        if split not in DATASETS.get(dataset, ()):
+            raise HTTPException(404, "评测数据集或 split 不可用。")
         try:
-            return manager.connections.save(backend, update)
+            if dataset == "beam":
+                local_path = beam_local_data_path(split, require_split=True)
+                loader = BEAMDataset(require_local_split=True)
+            else:
+                local_path = os.getenv(f"{dataset.replace('-', '_').upper()}_DATA_PATH")
+                loader = get_dataset(dataset)
+            count = len(loader.load_queries(split)) if local_path else STANDARD_QUERY_COUNTS[dataset][split]
+        except (OSError, ValueError, TypeError, KeyError, AttributeError) as exc:
+            raise HTTPException(422, "无法读取本地评测数据的题数。") from exc
+        return {"query_count": count}
+
+    @app.post("/api/models/{role}")
+    def save_model(role: Role, update: ModelInput):
+        try:
+            return manager.models.save(role, update)
         except ValueError as exc:
             raise HTTPException(422, str(exc)) from exc
 
-    @app.post("/api/connections/{backend}/reset")
-    def reset_connection(backend: BackendId):
-        return manager.connections.reset(backend)
+    @app.post("/api/models/{role}/reset")
+    def reset_model(role: Role):
+        return manager.models.reset(role)
+
+    @app.post("/api/models/{role}/test")
+    def test_model(role: Role, update: ModelProbeInput):
+        label = ROLES[role]
+        try:
+            model, model_env = manager.models.for_probe(role, update)
+        except ValueError as exc:
+            raise HTTPException(422, str(exc)) from exc
+        env = {**os.environ, **model_env}
+        # Evaluation debugging can log the provider's raw response. Keep probes out of that log.
+        env.pop("AMB_BAD_JSON_LOG", None)
+        if update.bypass_proxy:
+            env = {name: value for name, value in env.items()
+                   if name.lower() not in {"http_proxy", "https_proxy", "all_proxy"}}
+            env.update(NO_PROXY="*", no_proxy="*")
+        started = monotonic()
+        try:
+            result = subprocess.run(
+                [sys.executable, "-m", "memory_bench.workbench_worker", "--probe-model", role],
+                input=json.dumps(model), encoding="utf-8", env=env, timeout=MODEL_PROBE_TIMEOUT,
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            )
+        except subprocess.TimeoutExpired:
+            raise HTTPException(504, f"{label}测试在 {MODEL_PROBE_TIMEOUT} 秒内未完成。请检查后台网络或服务状态。") from None
+        except OSError:
+            raise HTTPException(500, f"后台无法启动{label}测试。") from None
+
+        if result.returncode:
+            messages = {
+                ModelProbeExit.INVALID_OUTPUT: (
+                    "模型返回的格式不正确，或评分结果与预期不符。" if role == "judge" else "模型返回的回答格式不正确。"
+                ),
+                ModelProbeExit.AUTH_FAILED: f"{label}鉴权失败，请检查 API Key 和访问权限。",
+                ModelProbeExit.NOT_FOUND: f"未找到{label}或 API 路径，请检查模型 ID 和地址。",
+                ModelProbeExit.REQUEST_REJECTED: "模型拒绝了请求，请检查模型配置和结构化输出支持。",
+            }
+            raise HTTPException(502, messages.get(result.returncode, f"后台调用{label}失败，请检查 API 地址和服务状态。"))
+        return {"model": f"{model['provider']}:{model['model']}", "elapsed_ms": round((monotonic() - started) * 1000)}
 
     @app.get("/api/runs")
     def runs(limit: Annotated[int, Query(ge=1, le=100)] = 30, offset: Annotated[int, Query(ge=0)] = 0):

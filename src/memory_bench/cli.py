@@ -54,8 +54,13 @@ def run(
     description: str = typer.Option(None, "--description", "-d", help="Optional description for this run (stored in the result JSON)"),
 ) -> None:
     """Run an evaluation on a single split (optionally filtered to a category)."""
-    if memory == "contextbase" and (dataset not in {"locomo", "locomo-fixed", "beam", "longmemeval"} or mode != "rag"):
-        raise typer.BadParameter("ContextBase supports LoCoMo, BEAM and LongMemEval in rag mode.", param_hint="--memory")
+    if memory == "contextbase":
+        rag_datasets = {"locomo", "locomo-fixed", "beam", "longmemeval", "lifebench-v2"}
+        if (dataset, mode) != ("precisionmembench", "retrieval") and (dataset not in rag_datasets or mode != "rag"):
+            raise typer.BadParameter(
+                "ContextBase supports LoCoMo, BEAM, LongMemEval and LifeBench 2.0 in rag mode, "
+                "and PrecisionMemBench in retrieval mode.", param_hint="--memory",
+            )
     no_llm = mode == "retrieval"  # search only: no answer model, no judge, no LLM key needed
     if not no_llm:
         _resolve_gemini_key()

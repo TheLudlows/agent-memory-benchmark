@@ -4,8 +4,7 @@ LongMemEval dataset (https://huggingface.co/datasets/xiaowu0162/longmemeval-clea
 A benchmark for long-term memory in LLM-based chat assistants with ~500 questions
 across 6 question types, each with its own haystack of conversation sessions.
 
-Data is auto-downloaded from HuggingFace on first use. You can also set
-LONGMEMEVAL_DATA_PATH to point at a local copy.
+The standard split is bundled. LONGMEMEVAL_DATA_PATH can point at a raw local copy.
 
 Structure
 ---------
@@ -24,21 +23,15 @@ Categories (query-level, by question_type):
   knowledge-update           single-session-preference
 """
 import json
-import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
 
 from rich.console import Console
 from rich.table import Table
 
-from ._cache import dataset_cache_dir, staging_file
+from ..data_files import data_path, read_json
 from .base import Dataset
 from ..models import Document, Query
-
-_DATA_URL = (
-    "https://huggingface.co/datasets/xiaowu0162/longmemeval-cleaned"
-    "/resolve/main/longmemeval_s_cleaned.json"
-)
 
 SPLITS = ["s"]
 
@@ -56,8 +49,7 @@ class LongMemEvalDataset(Dataset):
     """
     LongMemEval benchmark — long-term memory in LLM-based chat assistants.
 
-    Data is auto-downloaded from HuggingFace on first use.
-    Set LONGMEMEVAL_DATA_PATH to point at a local JSON file to skip download.
+    Set LONGMEMEVAL_DATA_PATH to point at a different local copy.
     """
 
     name = "longmemeval"
@@ -73,26 +65,14 @@ class LongMemEvalDataset(Dataset):
     def __init__(self) -> None:
         import os
         env = os.environ.get("LONGMEMEVAL_DATA_PATH")
-        self._local_path: Path | None = Path(env) if env else None
+        self._local_path: Path | None = Path(env).expanduser() if env else None
 
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
 
-    def _data_path(self) -> Path:
-        if self._local_path:
-            return self._local_path
-        cache = dataset_cache_dir("longmemeval")
-        path = cache / "longmemeval_s_cleaned.json"
-        if not path.exists():
-            print("Downloading LongMemEval dataset (~200MB)…")
-            with staging_file(path) as temporary:
-                urllib.request.urlretrieve(_DATA_URL, temporary)
-        return path
-
-    def _load_raw(self) -> list[dict]:
-        with open(self._data_path(), encoding="utf-8") as f:
-            return json.load(f)
+    def _load_raw(self) -> list[dict] | None:
+        return read_json(self._local_path) if self._local_path else None
 
     @staticmethod
     def _parse_date(date_str: str) -> datetime | None:
@@ -266,6 +246,11 @@ If it's correct, set correct=true."""
 
     def load_queries(self, split: str, category: str | None = None, limit: int | None = None) -> list[Query]:
         data = self._load_raw()
+        if data is None:
+            rows = read_json(data_path(self.name, split, "queries.json.gz"))
+            queries = [Query(**row) for row in rows if category is None or row["meta"]["question_type"] == category]
+            return queries[:limit] if limit else queries
+
         queries: list[Query] = []
 
         for item in data:
@@ -305,9 +290,38 @@ If it's correct, set correct=true."""
             queries = queries[:limit]
         return queries
 
+    @staticmethod
+    def _session_document(doc_id, content, user_id, timestamp, seen_doc_ids) -> Document:
+        count = seen_doc_ids.get(doc_id, 0) + 1
+        seen_doc_ids[doc_id] = count
+        if count > 1:
+            doc_id = f"{doc_id}~{count}"
+        date_display = datetime.fromisoformat(timestamp).strftime("%Y-%m-%d %H:%M:%S") if timestamp else "unknown"
+        return Document(
+            id=doc_id, content=content, user_id=user_id, timestamp=timestamp,
+            context=f"Session {doc_id} - you are the assistant in this conversation - happened on {date_display} UTC.",
+        )
+
     def load_documents(self, split: str, category: str | None = None, limit: int | None = None, ids: set[str] | None = None, user_ids: set[str] | None = None) -> list[Document]:
         data = self._load_raw()
         documents: list[Document] = []
+
+        if data is None:
+            if category is not None:
+                in_category = {q.user_id for q in self.load_queries(split, category=category)}
+                user_ids = in_category if user_ids is None else in_category & user_ids
+            seen_doc_ids: dict[str, int] = {}
+            for row in read_json(data_path(self.name, split, "documents.json.gz")):
+                if user_ids is not None and row["user_id"] not in user_ids:
+                    continue
+                if ids is not None and row["id"] not in ids:
+                    continue
+                documents.append(self._session_document(
+                    row["id"], row["content"], row["user_id"], row["timestamp"], seen_doc_ids,
+                ))
+                if limit and ids is None and len(documents) >= limit:
+                    break
+            return documents
 
         for item in data:
             qtype = item.get("question_type", "unknown")
@@ -331,12 +345,6 @@ If it's correct, set correct=true."""
                 doc_id = f"{question_id}_{session_id}"
                 if ids is not None and doc_id not in ids:
                     continue
-                # 13 questions in split s repeat a session (same turns, a later date). Hindsight
-                # rejects an async batch with duplicate document ids, so the repeat gets its own.
-                seen_doc_ids[doc_id] = seen_doc_ids.get(doc_id, 0) + 1
-                if seen_doc_ids[doc_id] > 1:
-                    doc_id = f"{doc_id}~{seen_doc_ids[doc_id]}"
-
                 # Clean turns (remove has_answer key)
                 cleaned = [
                     {k: v for k, v in t.items() if k != "has_answer"} if isinstance(t, dict) else t
@@ -344,16 +352,8 @@ If it's correct, set correct=true."""
                 ]
 
                 dt = self._parse_date(date_str)
-                timestamp = dt.isoformat() if dt else None
-                date_display = dt.strftime("%Y-%m-%d %H:%M:%S") if dt else "unknown"
-                ctx = f"Session {doc_id} - you are the assistant in this conversation - happened on {date_display} UTC."
-
-                documents.append(Document(
-                    id=doc_id,
-                    content=json.dumps(cleaned),
-                    user_id=question_id,
-                    timestamp=timestamp,
-                    context=ctx,
+                documents.append(self._session_document(
+                    doc_id, json.dumps(cleaned), question_id, dt.isoformat() if dt else None, seen_doc_ids,
                 ))
 
         if limit and ids is None:
@@ -369,11 +369,18 @@ If it's correct, set correct=true."""
         from collections import Counter
         cat_counts: Counter = Counter()
         total_sessions = 0
-        for item in data:
-            cat_counts[item.get("question_type", "unknown")] += 1
-            total_sessions += len(item.get("haystack_sessions", []))
+        if data is None:
+            queries = self.load_queries("s")
+            cat_counts.update(q.meta["question_type"] for q in queries)
+            total_sessions = read_json(data_path(self.name, "s", "stats.json.gz"))["docs"]
+            question_count = len(queries)
+        else:
+            for item in data:
+                cat_counts[item.get("question_type", "unknown")] += 1
+                total_sessions += len(item.get("haystack_sessions", []))
+            question_count = len(data)
 
-        table.add_row("Questions", str(len(data)))
+        table.add_row("Questions", str(question_count))
         table.add_row("Total sessions (docs)", str(total_sessions))
         for cat in _QUESTION_TYPES:
             table.add_row(f"  {cat}", str(cat_counts.get(cat, 0)))

@@ -74,7 +74,7 @@ class EvalSummary:
     total_queries: int
     correct: int
     accuracy: float | None  # None when scoring did not complete
-    ingestion_time_ms: float  # wall time for memory.ingest()
+    ingestion_time_ms: float  # sum of ingestion call durations; concurrent calls can overlap
     ingested_docs: int
     score_type: str = "accuracy"      # what `accuracy` holds: "accuracy", or a ranked metric such as "ndcg@10"
     description: str | None = None    # optional free-text annotation for this run
@@ -83,3 +83,4 @@ class EvalSummary:
     results: list[QueryResult] = field(default_factory=list)
     ingestion_run_id: str | None = None
     scoring_failed_queries: int = 0
+    ingestion_wall_time_ms: float | None = None  # time with at least one ingestion call active

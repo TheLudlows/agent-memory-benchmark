@@ -5,6 +5,10 @@ from pathlib import Path
 from ..models import Document
 
 
+class RetrievalError(RuntimeError):
+    """A search could not be completed."""
+
+
 class MemoryProvider(ABC):
     name: str
     description: str
@@ -15,6 +19,7 @@ class MemoryProvider(ABC):
     logo: str | None = None       # URL to provider logo image
     ingestion_run_id: str | None = None
     concurrency: int = 4  # max parallel queries; override to 1 for non-thread-safe providers
+    supports_incremental_ingest: bool = False
     supports_filters: bool = False
     """Whether retrieve() accepts a `filters` argument (a provider-neutral tag filter,
     see Dataset.retrieval_filter). Modes must not pass `filters` to providers without it."""
@@ -46,6 +51,10 @@ class MemoryProvider(ABC):
     async def async_ingest(self, documents: list[Document]) -> None:
         """Async version of ingest. Default falls back to running sync ingest in a thread."""
         return await asyncio.to_thread(self.ingest, documents)
+
+    async def async_ingest_increment(self, documents: list[Document], *, first: bool) -> None:
+        """Write a history segment, keeping prior segments in the same isolation unit."""
+        await self.async_ingest(documents)
 
     @abstractmethod
     def retrieve(self, query: str, k: int = 10, user_id: str | None = None, query_timestamp: str | None = None, filters: dict | None = None) -> tuple[list[Document], dict | None]:

@@ -3,5 +3,12 @@
 !uv.lock
 !src/
 !src/**
+!data/
+!data/offline/
+!data/offline/**
+!data/beam/
+!data/beam/**
+!data/longmemeval/
+!data/longmemeval/**
 **/__pycache__/
 **/*.pyc

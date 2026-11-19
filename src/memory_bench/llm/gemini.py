@@ -26,8 +26,10 @@ _RETRY_BASE_DELAY = 5   # seconds — doubles on each attempt (5, 10, 20, 40, 80
 
 
 class GeminiLLM(LLM):
-    def __init__(self, model: str = "gemini-2.5-flash-lite"):
-        self._client = genai.Client()
+    DEFAULT_MODEL = "gemini-2.5-flash-lite"
+
+    def __init__(self, model: str = DEFAULT_MODEL, *, api_key: str | None = None):
+        self._client = genai.Client(api_key=api_key) if api_key else genai.Client()
         self._model = model
 
     @property

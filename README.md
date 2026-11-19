@@ -6,7 +6,7 @@ Live leaderboard: **[agentmemorybenchmark.ai](https://agentmemorybenchmark.ai)**
 
 ## Docker quick start · 一键运行 LoCoMo
 
-在已克隆的仓库中使用 Docker Compose 2.24 或更新版本。镜像内置 LoCoMo 原始数据和分词表，连接已启动的 Hindsight 测试 API。首次构建需要联网。
+在已克隆的仓库中使用 Docker Compose 2.24 或更新版本。镜像内置评测台的全部数据集和分词表。首次构建需安装依赖，运行时只需能访问配置的评测后端和模型服务。
 
 1. 将仓库根目录的 `.env.example` 复制为 `.env`，填写 `GEMINI_API_KEY`。默认由 Gemini 回答和评分。
 2. 将 `HINDSIGHT_HTTP_URL` 指向测试实例，启用鉴权时填写 `HINDSIGHT_HTTP_KEY`。宿主机服务用 `http://host.docker.internal:8888`，远端服务用实际 URL。Linux 上宿主机服务的监听地址须允许容器网桥访问。
@@ -26,7 +26,7 @@ docker compose run --rm --build amb run --dataset locomo --split locomo10 --memo
 
 PR 的 GitHub Actions 构建成功后，也可下载 linux/amd64 镜像产物 `amb-locomo-linux-amd64`。解压下载的 ZIP，执行 `docker load -i amb-locomo-linux-amd64.tar.gz`，然后在仓库目录用 `docker compose run --rm amb` 启动。
 
-主分支镜像工作流成功后，亦可在仓库的 Packages 页面获取 `ghcr.io/theludlows/agent-memory-benchmark:latest` 或对应的 `sha-<commit>` 标签。镜像内 LoCoMo 的来源是 [snap-research/locomo](https://github.com/snap-research/locomo/tree/3eb6f2c585f5e1699204e3c3bdf7adc5c28cb376)，授权文件位于 `/opt/locomo/LICENSE.txt`。
+主分支镜像工作流成功后，亦可在仓库的 Packages 页面获取 `ghcr.io/theludlows/agent-memory-benchmark:latest` 或对应的 `sha-<commit>` 标签。镜像内 LoCoMo 的来源是 [snap-research/locomo](https://github.com/snap-research/locomo/tree/3eb6f2c585f5e1699204e3c3bdf7adc5c28cb376)，授权文件位于 `data/offline/locomo/LICENSE.txt`。
 
 ## The problem with existing benchmarks
 
@@ -97,36 +97,25 @@ uv run amb view
 
 ### AMB Workbench · 浏览器评测
 
-评测台可搭配 LoCoMo、BEAM 或 LongMemEval 和 ContextBase、Mem0 Cloud 或 Hindsight HTTP。
+评测台支持 LoCoMo、BEAM、LongMemEval、LifeBench 2.0 中文版和 PrecisionMemBench，可搭配 ContextBase、Mem0 Cloud 或 Hindsight HTTP。
 每轮填写评测名称，选择数据集、split 和后端，默认跑 5 题，也可跑全量。题数上限只限制问答，
-选中题目对应的会话历史仍会写入。运行时可看进度和日志，结束后可查看得分、写入耗时、平均检索延迟，
+LoCoMo、BEAM 和 LongMemEval 仍会写入所选题目对应的会话历史。PrecisionMemBench 始终写入完整测试数据。运行详情会显示当前阶段、已用时、已写入的文档数和已处理的题数。
+写入进度每组文档处理完后更新，答题进度逐题更新。结束后可查看得分、写入耗时、平均检索延迟，
 或下载 AMB 逐题结果 JSON。完成的评测会保存得分、题数、写入耗时、文档数、平均检索延迟和检索 P95。
-在「运行历史」勾选 2 至 4 轮，即可用图表对比得分与耗时。页面会提示题目或回答、评分模型不一致的情况。
+在「运行历史」勾选 2 至 4 轮，即可用图表对比得分与耗时。页面会提示题目、写入资料或回答、评分模型不一致的情况。
+新评测的写入实际耗时只统计至少有一个写入任务在执行的时间，并行区间计一次。旧记录保留原累计耗时口径，
+在另一个图表中展示。
 
-1. 复制 `.env.example` 为 `.env`，填写回答和评分模型所用的 API Key。默认两者使用 Gemini。
-2. 在 Linux x86_64 上，可以下载 [GitHub Actions](https://github.com/TheLudlows/agent-memory-benchmark/actions/workflows/workbench-image.yml) 中的 `amb-workbench-linux-amd64` 产物。解压 ZIP，再加载并启动：
-
-   ```sh
-   sha256sum -c amb-workbench-linux-amd64.tar.gz.sha256
-   docker load -i amb-workbench-linux-amd64.tar.gz
-   docker run -d --name amb-workbench --init --env-file .env \
-     --add-host=host.docker.internal:host-gateway \
-     -p 127.0.0.1:8090:8090 -v "$PWD/amb-results:/app/outputs" \
-     amb-workbench:local
-   ```
-
-   打开 http://127.0.0.1:8090。下载产物中附带 `amb.env.example`，可以直接用它创建 `.env`。
-   目标机只需 Docker。加载镜像、启动评测台和读取数据无需访问包仓库或数据源。
-   执行评测时，容器需要能访问选定的记忆后端以及回答和评分所用的模型 API。
-
-   在有源码和外网的机器上，也可以直接构建和启动：
+1. 如需通过环境变量预设配置，复制 `.env.example` 为 `.env`。模型 Key 也可在启动后通过页面填写。
+2. 启动评测台并打开 http://127.0.0.1:8090：
 
    ```sh
    docker compose up --build amb-web
    ```
 
-3. 在「本轮连接」填写 API 地址和 Key。若要复用同一地址已有的 Key，显式勾选「使用该地址已保存的 Key」。
-   每轮的历史记录包含名称、数据集、后端和实际使用的地址。单次输入的 Key 不写入历史或结果。
+3. 在「本轮连接」选择已有地址，或填写新地址和 Key。发起评测时按后端和地址自动保存连接，下次默认选中
+   该后端最近使用的地址。选择其他地址会带出对应的 Bank ID 和 Key 设置，填写新 Key 可更新该地址的 Key。
+   每轮的历史记录包含名称、数据集、后端和实际使用的地址。Key 保存在服务端的连接配置中，评测历史和结果不含 Key。
 
    | 后端 | 页面配置 |
    |---|---|
@@ -134,26 +123,44 @@ uv run amb view
    | Mem0 Cloud | API 地址（默认 `https://api.mem0.ai`）和 API Key，替换地址时需兼容 Mem0 Cloud API |
    | Hindsight HTTP | API 地址，开启鉴权时填写 API Key |
 
-点击「保存为默认连接」可为后续评测预填地址。也可以通过 `.env` 提供默认值：ContextBase 使用
+也可以通过 `.env` 提供初始连接。ContextBase 使用
 `CONTEXTBASE_API_URL`、`CONTEXTBASE_API_TOKEN`、`CONTEXTBASE_BANK_ID`；Mem0 使用 `MEM0_CLOUD_URL`、
 `MEM0_CLOUD_KEY`（或 `MEM0_API_KEY`）；Hindsight 使用 `HINDSIGHT_HTTP_URL`、`HINDSIGHT_HTTP_KEY`。
-页面的「恢复初始配置」会删除该后端保存的连接，再读取这些默认值。网页设置保存在评测台运行目录的
-`.connections.json`，重启后仍可使用。页面只显示 Key 是否已配置，改地址时需要重新填写 Key。
+连接配置保存在结果目录之外，
+直接运行时使用 `~/.config/amb/workbench/`（可用 `AMB_WORKBENCH_CONFIG_DIR` 指定私有配置目录），
+Docker Compose 使用独立的 `amb-workbench-config` 卷。升级后，旧的 `.connections.json` 会自动迁移并从
+结果目录移除。选择「输入新地址」后，可填写适用于该地址的 Key。Hindsight 无需鉴权时可取消使用该地址的 Key。
 
 也可以在仓库根目录直接运行 `uv run amb workbench`。本地直跑时，同机 Hindsight 的地址通常是
 `http://127.0.0.1:8888`。Docker 中连接宿主机用 `http://host.docker.internal:8888`，并确保 API
 监听容器可访问的地址。
 
-使用 OpenAI 兼容模型服务时，将 `OMB_ANSWER_LLM` 和 `OMB_JUDGE_LLM` 设置为 `openai`，并配置
-`OPENAI_BASE_URL`、`OPENAI_API_KEY`、`OMB_ANSWER_MODEL` 和 `OMB_JUDGE_MODEL`。模型端点需要支持
-Chat Completions 的 JSON Schema 输出，`OPENAI_BASE_URL` 应包含服务的 API 前缀（通常是 `/v1`）。ContextBase 和 Hindsight 在各自服务内配置写入和检索使用的模型。
+展开「全局模型设置」，分别配置回答模型和评分模型。回答模型根据检索结果生成答案，评分模型根据参考答案或评分规则打分。选择 Gemini、OpenAI 兼容或 Groq，填写模型 ID 和 Key。OpenAI 兼容服务需填写 Chat Completions 的 API 地址及前缀（通常是 `/v1`）。AMB 优先通过 API 请求 JSON Schema 输出，网关忽略或拒绝这一参数时，会改用提示词要求模型返回符合字段定义的 JSON。
 
-评测台镜像内置 LoCoMo `locomo10`、BEAM `100k / 500k / 1m / 10m` 和 LongMemEval `s`（cleaned 版本）。
-镜像构建固定数据版本并校验 SHA-256。授权与来源说明位于 `/opt/locomo` 和 `/opt/amb-datasets`。
-可通过 `LOCOMO_DATA_PATH`、`LONGMEMEVAL_DATA_PATH` 指定自备的本地数据。BEAM 按 split 使用 `BEAM_100K_DATA_PATH`、
+点击「测试回答模型」或「测试评分模型」，评测台后台会用当前填写的配置处理一道固定样题并检查结果。可以在保存前测试。留空 Key 时，后台按同样的规则复用已有 Key。测试默认沿用后台的代理设置。可勾选「测试时跳过代理」让这次测试直连模型地址。测试最多等待 20 秒，结果显示在该模型设置下方。
+
+每轮评测在启动时读取全局模型设置，运行详情记录当时实际使用的模型。修改设置后，下一轮评测使用新配置。编辑全局模型时，留空 Key 可复用同一提供方和 API 地址已配置的 Key。全局配置在重启后保留，并与默认连接一起存放在私有配置目录。
+
+没有保存网页默认配置时，系统使用 `.env` 中的 `OMB_ANSWER_LLM`、`OMB_ANSWER_MODEL`、`OMB_JUDGE_LLM`、`OMB_JUDGE_MODEL` 和相应提供方的 Key。页面可随时恢复这些默认值。ContextBase 和 Hindsight 在各自服务内配置写入和检索使用的模型。
+
+可选 split 为 LoCoMo `locomo10`、BEAM `100k / 500k / 1m / 10m`、LongMemEval `s`、
+LifeBench 2.0 `zh`（3,380 题）、PrecisionMemBench `single-turn`（77 个用例）。以上数据和分词表都随仓库及
+镜像提供。使用完整仓库并提前安装依赖，或提前导入构建好的镜像，运行时无需连接数据源网站。
+仍可通过 `LOCOMO_DATA_PATH`、
+`LONGMEMEVAL_DATA_PATH` 指定本地数据。BEAM 按 split 使用 `BEAM_100K_DATA_PATH`、
 `BEAM_500K_DATA_PATH`、`BEAM_1M_DATA_PATH` 或 `BEAM_10M_DATA_PATH`。如果评测台继续使用
 `BEAM_DATA_PATH`，需要同时用 `BEAM_DATA_SPLIT` 指明文件所属的标准 split。没有指定本地文件的 split
-会使用对应的官方数据。在未包含数据的本地安装中，首次使用时会下载。比较不同后端时，请使用相同的 split、题数和回答及评分模型。
+会使用仓库随附的对应数据。比较不同后端时，请使用相同的 split、题数和回答及评分模型。
+
+- **LifeBench 2.0 中文版**使用官方原始中文数据。每个用户的档案、日常事件和九类手机记录按日期和来源写入，
+  AMB 用中文回答，并根据参考答案和评分要点判定正误。可用 `LIFEBENCH_V2_DATA_PATH` 指向官方中文 `data/`
+  目录，该目录直接包含各用户文件夹。评测按用户和提问日期推进，每批只补写截至该日期的记录，
+  并等待写入完成才作答。CLI 运行需要支持增量写入的后端，每轮从新的时间线开始。
+- **PrecisionMemBench**直接用返回的记忆比对预期 ID，评测台无需配置回答或评分模型。
+  结果展示总通过率、实际检索用例通过数、平均检索精确率和召回率。可用
+  `PRECISIONMEMBENCH_DATA_PATH` 指向含 `beliefs.seed.json` 和 `retrieval.cases.json` 的目录。
+  检索报错或无法映射来源的用例会使总分标记为未完成。Hindsight HTTP 使用原有的共享 Bank、用户标签和召回过滤，
+  服务端需支持对应的 Bank 配置和标签筛选。
 
 BEAM 有答案的题目如果没有召回内容，以 0 分计入平均分。数据集标注的拒答题（`abstention`）即使
 没有召回内容，也会按评分标准检查模型是否说明信息不足。评分服务失败时，运行标为「评分未完成」并显示失败题数。
@@ -162,7 +169,32 @@ BEAM 有答案的题目如果没有召回内容，以 0 分计入平均分。数
 评测台供本机单用户使用，一次运行一个评测。每次运行都有独立的 Hindsight Bank 名称或 Mem0 用户 ID；
 ContextBase 使用预授权的测试 Bank，并以运行和题目所属的隔离单元标签分开数据。停止评测会终止本地
 评测进程，之前已提交给后端的写入可能仍在处理。历史、日志和结果均保存在
-`amb-results/workbench/`（Docker）或 `outputs/workbench/`（直接运行）。
+`amb-results/workbench/`（Compose）或 `outputs/workbench/`（直接运行）。
+
+#### 在华为云 ECS 上启动 Workbench
+
+[AMB Workbench image](https://github.com/TheLudlows/agent-memory-benchmark/actions/workflows/workbench-image.yml)
+在通过断网测试后，将 Linux x86_64 服务镜像发布到
+`ghcr.io/theludlows/agent-memory-benchmark:workbench`。
+需要固定版本时，将标签换成 `workbench-sha-<完整提交 SHA>`。
+
+1. 创建能访问 GHCR 的 x86_64 ECS，选择带 Cloud-init 的 Ubuntu 镜像。在「实例自定义数据」中粘贴
+   [启动脚本](deploy/ecs-user-data.sh)。首次启动时，脚本安装 Docker（如需要）、启动 Workbench，并持久化评测结果和配置。
+2. 从本地建立 SSH 隧道，然后打开 [Workbench](http://127.0.0.1:8090)。请按所选系统镜像替换登录用户名。
+
+   ```sh
+   ssh -N -L 8090:127.0.0.1:8090 ubuntu@ECS_IP
+   ```
+
+已安装 Docker 的断网主机，可以从上述工作流下载 `amb-workbench-linux-amd64`，将解压后的文件复制到主机，再执行以下命令。
+
+```sh
+sha256sum -c amb-workbench-linux-amd64.tar.gz.sha256
+sudo docker load -i amb-workbench-linux-amd64.tar.gz
+sudo AMB_IMAGE=amb-workbench:local AMB_PULL=never bash ecs-user-data.sh
+```
+
+启动后，在页面填写容器可访问的记忆服务地址，并按评测需要配置回答和评分模型。无公网时，可以使用同机或内网的 API。
 
 ### LoCoMo on ContextBase
 

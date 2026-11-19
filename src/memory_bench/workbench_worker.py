@@ -1,6 +1,7 @@
 """Evaluate one Workbench run in a separate process."""
 
 import json
+import logging
 import sys
 from collections.abc import Iterable
 from dataclasses import asdict
@@ -8,9 +9,11 @@ from hashlib import sha256
 from math import ceil
 from pathlib import Path
 from statistics import mean
+from time import monotonic
 
 from .dataset import get_dataset
 from .dataset.beam import BEAMDataset
+from .json_files import is_windows_file_contention, write_json
 from .judge import GeminiJudge, ScoringError
 from .memory import get_memory_provider
 from .memory.hindsight import HindsightHTTPMemoryProvider
@@ -19,8 +22,10 @@ from .models import Document
 from .modes import get_mode
 from .modes.rag import RAGMode
 from .runner import EvaluationProgress, EvalRunner
-from .workbench import SCORING_INCOMPLETE_EXIT_CODE, RunSelection, _read_json, write_json
+from .workbench import SCORING_INCOMPLETE_EXIT_CODE, RunSelection, _read_json
 from .workbench_models import ModelProbeExit, Role, worker_model
+
+logger = logging.getLogger(__name__)
 
 
 def run(directory: Path) -> int:
@@ -28,7 +33,26 @@ def run(directory: Path) -> int:
     spec = RunSelection.model_validate(job["selection"])
     run_id = job["id"]
     progress_path = directory / "progress.json"
-    write_json(progress_path, asdict(EvaluationProgress("loading")))
+    expected_queries = 0
+    retry_progress_at = 0.0
+
+    def progress(update: EvaluationProgress) -> None:
+        nonlocal expected_queries, retry_progress_at
+        expected_queries = update.total
+        if update.stage != "finalizing" and monotonic() < retry_progress_at:
+            return
+        try:
+            write_json(progress_path, asdict(update))
+        except PermissionError as exc:
+            if not is_windows_file_contention(exc):
+                raise
+            if not retry_progress_at:
+                logger.warning("Could not update the progress file; the evaluation will continue: %s", exc)
+            retry_progress_at = monotonic() + 2
+        else:
+            retry_progress_at = 0.0
+
+    progress(EvaluationProgress("loading"))
     prefix = f"amb-web-{run_id}-"
     if spec.backend == "hindsight-http":
         memory = HindsightHTTPMemoryProvider(bank_prefix=prefix)
@@ -36,13 +60,6 @@ def run(directory: Path) -> int:
         memory = Mem0CloudMemoryProvider(user_prefix=prefix)
     else:
         memory = get_memory_provider(spec.backend)
-
-    expected_queries = 0
-
-    def progress(update: EvaluationProgress) -> None:
-        nonlocal expected_queries
-        expected_queries = update.total
-        write_json(progress_path, asdict(update))
 
     document_digest = sha256()
 

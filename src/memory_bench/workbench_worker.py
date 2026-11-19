@@ -17,9 +17,10 @@ from .memory.hindsight import HindsightHTTPMemoryProvider
 from .memory.mem0_cloud import Mem0CloudMemoryProvider
 from .models import Document
 from .modes import get_mode
+from .modes.rag import RAGMode
 from .runner import EvaluationProgress, EvalRunner
 from .workbench import SCORING_INCOMPLETE_EXIT_CODE, RunSelection, _read_json, write_json
-from .workbench_models import JudgeProbeExit, worker_model
+from .workbench_models import ModelProbeExit, Role, worker_model
 
 
 def run(directory: Path) -> int:
@@ -91,25 +92,32 @@ def run(directory: Path) -> int:
     return SCORING_INCOMPLETE_EXIT_CODE if summary.scoring_failed_queries else 0
 
 
-def probe_judge() -> int:
+def probe_model(role: Role) -> int:
     try:
-        judge = GeminiJudge(llm=worker_model("judge", json.load(sys.stdin)))
-        result = judge.score("What is 2 + 2?", "4", ["4"], strict=True)
-        return 0 if result.correct else JudgeProbeExit.INVALID_SCORE
-    except (ScoringError, json.JSONDecodeError):
-        return JudgeProbeExit.INVALID_SCORE
+        llm = worker_model(role, json.load(sys.stdin))
+        if role == "answer":
+            result = RAGMode(llm=llm).answer_from_context("Which city did Lina visit?", "Lina visited Paris.")
+            valid = (
+                isinstance(result.answer, str) and bool(result.answer.strip()) and isinstance(result.reasoning, str)
+            )
+        else:
+            score = GeminiJudge(llm=llm).score("What is 2 + 2?", "4", ["4"], strict=True)
+            valid = score.correct
+        return 0 if valid else ModelProbeExit.INVALID_OUTPUT
+    except (ScoringError, json.JSONDecodeError, KeyError, TypeError):
+        return ModelProbeExit.INVALID_OUTPUT
     except Exception as exc:
         status = getattr(exc, "status_code", None) or getattr(exc, "code", None)
         if status in (401, 403):
-            return JudgeProbeExit.AUTH_FAILED
+            return ModelProbeExit.AUTH_FAILED
         if status == 404:
-            return JudgeProbeExit.NOT_FOUND
+            return ModelProbeExit.NOT_FOUND
         if status in (400, 422):
-            return JudgeProbeExit.REQUEST_REJECTED
-        return JudgeProbeExit.REQUEST_FAILED
+            return ModelProbeExit.REQUEST_REJECTED
+        return ModelProbeExit.REQUEST_FAILED
 
 
 if __name__ == "__main__":
-    if sys.argv[1] == "--probe-judge":
-        raise SystemExit(probe_judge())
+    if sys.argv[1] == "--probe-model":
+        raise SystemExit(probe_model(sys.argv[2]))
     raise SystemExit(run(Path(sys.argv[1])))

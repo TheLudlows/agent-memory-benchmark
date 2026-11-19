@@ -30,10 +30,17 @@ from rich.console import Console
 from rich.table import Table
 
 from ..data_files import data_path, read_json
+from ._cache import cached_or_download
 from .base import Dataset
 from ..models import Document, Query
 
 SPLITS = ["s"]
+_RAW_NAME = "longmemeval_s_cleaned.json"
+_RAW_URL = (
+    "https://huggingface.co/datasets/xiaowu0162/longmemeval-cleaned"
+    "/resolve/98d7416c24c778c2fee6e6f3006e7a073259d48f/" + _RAW_NAME
+)
+_RAW_SHA256 = "d6f21ea9d60a0d56f34a05b609c79c88a451d2ae03597821ea3d5a9678c3a442"
 
 _QUESTION_TYPES = [
     "single-session-user",
@@ -71,8 +78,12 @@ class LongMemEvalDataset(Dataset):
     # Internal helpers
     # ------------------------------------------------------------------
 
-    def _load_raw(self) -> list[dict] | None:
-        return read_json(self._local_path) if self._local_path else None
+    def _load_raw(self, *bundled_files: str) -> list[dict] | None:
+        if self._local_path:
+            return read_json(self._local_path)
+        if all(data_path(self.name, "s", file).is_file() for file in bundled_files):
+            return None
+        return read_json(cached_or_download(self.name, _RAW_NAME, _RAW_URL, _RAW_SHA256))
 
     @staticmethod
     def _parse_date(date_str: str) -> datetime | None:
@@ -245,7 +256,7 @@ If it's correct, set correct=true."""
         return axes
 
     def load_queries(self, split: str, category: str | None = None, limit: int | None = None) -> list[Query]:
-        data = self._load_raw()
+        data = self._load_raw("queries.json.gz")
         if data is None:
             rows = read_json(data_path(self.name, split, "queries.json.gz"))
             queries = [Query(**row) for row in rows if category is None or row["meta"]["question_type"] == category]
@@ -303,7 +314,7 @@ If it's correct, set correct=true."""
         )
 
     def load_documents(self, split: str, category: str | None = None, limit: int | None = None, ids: set[str] | None = None, user_ids: set[str] | None = None) -> list[Document]:
-        data = self._load_raw()
+        data = self._load_raw("documents.json.gz")
         documents: list[Document] = []
 
         if data is None:
@@ -361,7 +372,7 @@ If it's correct, set correct=true."""
         return documents
 
     def dataset_stats(self, console: Console, **_) -> None:
-        data = self._load_raw()
+        data = self._load_raw("queries.json.gz", "stats.json.gz")
         table = Table(title="LongMemEval dataset stats")
         table.add_column("Metric", style="bold")
         table.add_column("Value", justify="right")

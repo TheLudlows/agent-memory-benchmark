@@ -31,6 +31,7 @@ class Mem0CloudMemoryProvider(MemoryProvider):
 
     def _ensure_client(self):
         if self._client is None:
+            os.environ.setdefault("MEM0_TELEMETRY", "false")
             from mem0 import MemoryClient
             api_key = os.environ.get("MEM0_CLOUD_KEY") or os.environ["MEM0_API_KEY"]
             self._client = MemoryClient(api_key=api_key, host=os.environ.get("MEM0_CLOUD_URL") or None)

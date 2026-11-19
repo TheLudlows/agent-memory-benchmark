@@ -162,7 +162,7 @@ class RunManager:
             write_json(directory / "run.json", job)
             env = {
                 **os.environ, **connection.worker_env(selection.backend), **model_env,
-                "NO_COLOR": "1", "PYTHONUNBUFFERED": "1",
+                "NO_COLOR": "1", "PYTHONUNBUFFERED": "1", "PYTHONIOENCODING": "utf-8",
             }
             try:
                 process = subprocess.Popen(

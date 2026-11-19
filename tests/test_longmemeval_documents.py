@@ -10,6 +10,6 @@ def test_a_repeated_session_gets_its_own_document_id(monkeypatch):
         "haystack_sessions": [[{"role": "user", "content": "hi"}]] * 3,
     }
     ds = LongMemEvalDataset()
-    monkeypatch.setattr(ds, "_load_raw", lambda: [item])
+    monkeypatch.setattr(ds, "_load_raw", lambda *_: [item])
     ids = [d.id for d in ds.load_documents("s")]
     assert ids == ["q1_s1", "q1_s2", "q1_s1~2"]

@@ -30,10 +30,14 @@ from rich.console import Console
 from rich.table import Table
 
 from ..data_files import data_path, read_json
+from ._cache import cached_or_download
 from .base import Dataset
 from ..models import Document, Query
 
 SPLITS = ["locomo10"]
+_RAW_NAME = "locomo10.json"
+_RAW_URL = "https://raw.githubusercontent.com/snap-research/locomo/3eb6f2c585f5e1699204e3c3bdf7adc5c28cb376/data/" + _RAW_NAME
+_RAW_SHA256 = "79fa87e90f04081343b8c8debecb80a9a6842b76a7aa537dc9fdf651ea698ff4"
 
 _CATEGORY_NAMES = {
     1: "single-hop",
@@ -84,7 +88,12 @@ class LoComoDataset(Dataset):
     # ------------------------------------------------------------------
 
     def _data_path(self) -> Path:
-        return self._local_path or data_path("offline", "locomo", "locomo10.json.xz")
+        if self._local_path:
+            return self._local_path
+        bundle = data_path("offline", "locomo", "locomo10.json.xz")
+        if bundle.is_file():
+            return bundle
+        return cached_or_download("locomo", _RAW_NAME, _RAW_URL, _RAW_SHA256)
 
     def _load_raw(self) -> list[dict]:
         return read_json(self._data_path())

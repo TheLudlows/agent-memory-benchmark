@@ -1,6 +1,7 @@
 import asyncio
 import io
 import json
+import os
 import threading
 import time
 from dataclasses import asdict
@@ -466,7 +467,7 @@ def test_result_download_during_checkpoint_replacement(tmp_path, replace_on):
 
 def test_beam_can_rejudge_a_legacy_empty_context_abstention(monkeypatch, tmp_path):
     dataset = BEAMDataset()
-    monkeypatch.setattr(dataset, "_load_raw", lambda split: [{
+    monkeypatch.setattr(dataset, "_load_raw", lambda split, **_: [{
         "conversation_id": "conv",
         "chat": [[{"role": "user", "content": "I live in Paris."}]],
         "probing_questions": {"abstention": [{"question": "What is my salary?"}]},
@@ -585,10 +586,12 @@ def test_mem0_client_uses_configured_host(monkeypatch):
 
     monkeypatch.setenv("MEM0_CLOUD_URL", "https://example.test/mem0")
     monkeypatch.setenv("MEM0_CLOUD_KEY", "test-api-key")
+    monkeypatch.delenv("MEM0_TELEMETRY", raising=False)
     calls = []
     monkeypatch.setattr(mem0, "MemoryClient", lambda **kwargs: calls.append(kwargs))
     Mem0CloudMemoryProvider()._ensure_client()
     assert calls == [{"api_key": "test-api-key", "host": "https://example.test/mem0"}]
+    assert os.environ["MEM0_TELEMETRY"] == "false"
 
 
 def test_workbench_requires_per_run_details_and_never_echoes_key(monkeypatch, tmp_path):
@@ -616,7 +619,7 @@ def test_progress_tracks_parallel_writes_and_answers_independently(monkeypatch, 
     dataset = BEAMDataset()
     turn = {"role": "user", "content": "Paris"}
     question = {"question": "Where?", "answer": "Paris"}
-    monkeypatch.setattr(dataset, "_load_raw", lambda split: [
+    monkeypatch.setattr(dataset, "_load_raw", lambda split, **_: [
         {
             "conversation_id": unit, "chat": [[turn]] * documents,
             "probing_questions": {"information_extraction": [question]},

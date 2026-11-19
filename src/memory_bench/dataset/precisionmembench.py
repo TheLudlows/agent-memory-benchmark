@@ -65,12 +65,18 @@ from rich.console import Console
 from rich.table import Table
 
 from ..data_files import data_path, read_json
+from ._cache import cached_or_download
 from .base import Dataset
 from ..judge import ScoringError
 from ..models import Document, Query
 
 SPLITS = ["single-turn"]
 TOTAL_QUERIES = 77
+_FIXTURE_URL = "https://raw.githubusercontent.com/tenurehq/precisionmembench/b95d6abb471c0d591c440172283dd74e7af000df/fixtures/"
+_FIXTURE_SHA256 = {
+    "beliefs.seed.json": "35659b3b9a581b644fc6746e1b4e902c3e7b56c0973b546bf7b0816a69e3de98",
+    "retrieval.cases.json": "09e99f0852280538abe34b03570f65583fdb10df3c554b7150f0f665d5db709c",
+}
 
 DEFAULT_USER_ID = "test-user"
 
@@ -220,6 +226,8 @@ class PrecisionMemBenchDataset(Dataset):
             return self._cache[filename]
         env = os.environ.get("PRECISIONMEMBENCH_DATA_PATH")
         path = Path(env).expanduser() / filename if env else data_path("offline", self.name, filename)
+        if not env and not path.is_file():
+            path = cached_or_download(self.name, filename, _FIXTURE_URL + filename, _FIXTURE_SHA256[filename])
         data = read_json(path)
         self._cache[filename] = data
         return data

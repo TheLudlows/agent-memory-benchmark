@@ -8,11 +8,16 @@ from functools import lru_cache
 from pathlib import Path
 
 from ..data_files import data_path, read_json
+from ._cache import cached_or_download
 from .base import Dataset
 from ..models import Document, Query
 
 SPLITS = ["zh"]
 TOTAL_QUERIES = 3380
+_RAW_URL = (
+    "https://raw.githubusercontent.com/1754955896/LifeBench/"
+    "b4adbe3d0afa66efa4ab362e9d67160089f860dd/life_bench_data/version2/data/"
+)
 _USERS = (
     "fenghaoran", "leimingxuan", "lumingqiang", "maxiulan", "songyajing",
     "sunyuwei", "yemingxuan", "yinhao", "yuxiaowei", "yuxiaowen",
@@ -58,7 +63,12 @@ class LifeBenchV2Dataset(Dataset):
         local_root = os.environ.get("LIFEBENCH_V2_DATA_PATH")
         if local_root:
             return read_json(Path(local_root).expanduser() / user / file)
-        return _bundled_user(user)[file]
+        if data_path("offline", self.name, f"{user}.json.xz").is_file():
+            bundled = _bundled_user(user)
+            if file in bundled:
+                return bundled[file]
+        filename = f"{user}/{file}"
+        return read_json(cached_or_download(self.name, filename, _RAW_URL + filename))
 
     def load_queries(
         self, split: str, category: str | None = None, limit: int | None = None,

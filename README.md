@@ -145,12 +145,13 @@ Docker Compose 使用独立的 `amb-workbench-config` 卷。升级后，旧的 `
 
 可选 split 为 LoCoMo `locomo10`、BEAM `100k / 500k / 1m / 10m`、LongMemEval `s`、
 LifeBench 2.0 `zh`（3,380 题）、PrecisionMemBench `single-turn`（77 个用例）。以上数据和分词表都随仓库及
-镜像提供。使用完整仓库并提前安装依赖，或提前导入构建好的镜像，运行时无需连接数据源网站。
+镜像提供。使用完整仓库并提前安装依赖，或提前导入构建好的镜像，运行时从本地读取数据和词表，只需能访问配置的记忆后端和模型端点。
+本地文件缺失时，默认直接报告缺失项。在可联网的环境中准备缓存时，可以设置 `AMB_ALLOW_DATASET_DOWNLOADS=1`，让 AMB 下载缺失的上游文件。
 仍可通过 `LOCOMO_DATA_PATH`、
 `LONGMEMEVAL_DATA_PATH` 指定本地数据。BEAM 按 split 使用 `BEAM_100K_DATA_PATH`、
 `BEAM_500K_DATA_PATH`、`BEAM_1M_DATA_PATH` 或 `BEAM_10M_DATA_PATH`。如果评测台继续使用
 `BEAM_DATA_PATH`，需要同时用 `BEAM_DATA_SPLIT` 指明文件所属的标准 split。没有指定本地文件的 split
-会使用仓库随附的对应数据。比较不同后端时，请使用相同的 split、题数和回答及评分模型。
+会按上述顺序加载数据。比较不同后端时，请使用相同的 split、题数和回答及评分模型。
 
 - **LifeBench 2.0 中文版**使用官方原始中文数据。每个用户的档案、日常事件和九类手机记录按日期和来源写入，
   AMB 用中文回答，并根据参考答案和评分要点判定正误。可用 `LIFEBENCH_V2_DATA_PATH` 指向官方中文 `data/`

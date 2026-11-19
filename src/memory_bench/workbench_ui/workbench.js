@@ -499,7 +499,22 @@ async function loadDetail(id) {
   $("empty").hidden = true;
   $("run-detail").hidden = false;
   $("run-name").textContent = title(job);
-  $("run-meta").textContent = `${runType(job)} · ${formatDate(job.started_at)} · ${modelLabels(job)}`;
+  $("run-type").textContent = runType(job);
+  $("run-started-at").dateTime = job.started_at;
+  $("run-started-at").textContent = formatDate(job.started_at);
+  const retrieval = retrievalOnly(job.selection.dataset);
+  $("run-retrieval-mode").hidden = !retrieval;
+  $("run-models").hidden = retrieval;
+  if (!retrieval) {
+    const answer = storedModelLabel(job, "answer");
+    const shared = Boolean(answer) && answer === storedModelLabel(job, "judge")
+      && job.models?.answer?.api_url === job.models?.judge?.api_url;
+    $("run-answer-label").textContent = shared ? "回答与评分模型" : modelRoles.answer;
+    $("run-answer-model").textContent = storedModelDetail(job, "answer");
+    $("run-judge-label").hidden = shared;
+    $("run-judge-model").hidden = shared;
+    $("run-judge-model").textContent = shared ? "" : storedModelDetail(job, "judge");
+  }
   const target = job.target;
   $("run-target").hidden = !target?.api_url;
   $("run-target").textContent = target?.api_url
@@ -512,7 +527,6 @@ async function loadDetail(id) {
   renderRunProgress(job);
 
   const s = job.summary;
-  const retrieval = retrievalOnly(job.selection.dataset);
   $("questions-progress-label").textContent = retrieval ? "检索用例进度" : "答题与评分进度";
   $("distribution-label").textContent = retrieval ? "用例通过分布" : "答题分布";
   for (const [id, value] of [

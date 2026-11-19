@@ -53,6 +53,8 @@ _HF_SPLIT_MAP = {
     "1m":   "1M",
 }
 
+DEFAULT_JUDGE_MODEL = "gemini-3.5-flash"
+
 SPLITS = ["100k", "500k", "1m", "10m"]
 
 
@@ -464,7 +466,7 @@ class BEAMDataset(Dataset):
             return get_judge_llm()
 
         from ..llm.gemini import GeminiLLM
-        return GeminiLLM(os.environ.get("OMB_JUDGE_MODEL") or "gemini-3.5-flash")
+        return GeminiLLM(os.environ.get("OMB_JUDGE_MODEL") or DEFAULT_JUDGE_MODEL)
 
     def build_judge_prompt(self, query: str, gold_answers: list[str], answer: str) -> str:
         # Overridden per-query via get_judge_prompt_fn when meta is available.

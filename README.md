@@ -106,7 +106,7 @@ uv run amb view
 新评测的写入实际耗时只统计至少有一个写入任务在执行的时间，并行区间计一次。旧记录保留原累计耗时口径，
 在另一个图表中展示。
 
-1. 复制 `.env.example` 为 `.env`，填写回答和评分模型所用的 API Key。默认两者使用 Gemini。
+1. 如需通过环境变量预设配置，复制 `.env.example` 为 `.env`。模型 Key 也可在启动后通过页面填写。
 2. 启动评测台并打开 http://127.0.0.1:8090：
 
    ```sh
@@ -134,9 +134,11 @@ Docker Compose 使用独立的 `amb-workbench-config` 卷。升级后，旧的 `
 `http://127.0.0.1:8888`。Docker 中连接宿主机用 `http://host.docker.internal:8888`，并确保 API
 监听容器可访问的地址。
 
-使用 OpenAI 兼容模型服务时，将 `OMB_ANSWER_LLM` 和 `OMB_JUDGE_LLM` 设置为 `openai`，并配置
-`OPENAI_BASE_URL`、`OPENAI_API_KEY`、`OMB_ANSWER_MODEL` 和 `OMB_JUDGE_MODEL`。模型端点需要支持
-Chat Completions 的 JSON Schema 输出，`OPENAI_BASE_URL` 应包含服务的 API 前缀（通常是 `/v1`）。ContextBase 和 Hindsight 在各自服务内配置写入和检索使用的模型。
+展开「全局模型设置」，分别配置回答模型和评分模型。回答模型根据检索结果生成答案，评分模型根据参考答案或评分规则打分。选择 Gemini、OpenAI 兼容或 Groq，填写模型 ID 和 Key。OpenAI 兼容服务还需填写 API 地址及前缀（通常是 `/v1`），并支持 Chat Completions 的 JSON Schema 输出。
+
+在「本轮模型」中可为任一角色勾选「本轮单独指定」。未勾选的角色使用全局默认配置。留空 Key 时，只有提供方和 API 地址匹配的已配置 Key 可以复用。本轮填写的 Key 不保存，运行详情记录实际使用的模型。全局配置在重启后保留，并与默认连接一起存放在私有配置目录。
+
+没有保存网页默认配置时，系统使用 `.env` 中的 `OMB_ANSWER_LLM`、`OMB_ANSWER_MODEL`、`OMB_JUDGE_LLM`、`OMB_JUDGE_MODEL` 和相应提供方的 Key。页面可随时恢复这些默认值。ContextBase 和 Hindsight 在各自服务内配置写入和检索使用的模型。
 
 可选 split 为 LoCoMo `locomo10`、BEAM `100k / 500k / 1m / 10m`、LongMemEval `s`。Compose 镜像
 内置 LoCoMo，首次运行其他数据集时会下载数据。直接运行时可通过 `LOCOMO_DATA_PATH`、

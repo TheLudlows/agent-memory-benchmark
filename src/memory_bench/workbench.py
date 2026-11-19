@@ -22,20 +22,16 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, Field, StringConstraints, model_validator
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
-from .dataset.beam import SPLITS as BEAM_SPLITS, local_data_path as beam_local_data_path
+from .dataset.beam import DEFAULT_JUDGE_MODEL, SPLITS as BEAM_SPLITS, local_data_path as beam_local_data_path
 from .dataset.locomo import SPLITS as LOCOMO_SPLITS
 from .dataset.longmemeval import SPLITS as LONGMEMEVAL_SPLITS
 from .workbench_connections import BackendId, Connections, ConnectionUpdate, RunConnection
+from .workbench_models import ModelInput, ModelSettings, Role, RunModels
 
 DATASETS = {
     "locomo": LOCOMO_SPLITS,
     "beam": BEAM_SPLITS,
     "longmemeval": LONGMEMEVAL_SPLITS,
-}
-LLM_KEYS = {
-    "gemini": ("GEMINI_API_KEY", "GOOGLE_API_KEY"),
-    "openai": ("OPENAI_API_KEY",),
-    "groq": ("GROQ_API_KEY",),
 }
 RUN_ID = re.compile(r"[0-9a-f]{32}")
 SCORING_INCOMPLETE_EXIT_CODE = 2
@@ -59,6 +55,7 @@ class RunSelection(BaseModel):
 class RunRequest(RunSelection):
     name: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=80)]
     connection: RunConnection
+    models: RunModels = Field(default_factory=RunModels)
 
 
 def _dataset_error(dataset: str, split: str) -> str | None:
@@ -68,28 +65,6 @@ def _dataset_error(dataset: str, split: str) -> str | None:
         except ValueError as exc:
             return str(exc)
     return None
-
-
-def _configured(*keys: str) -> bool:
-    return any(os.environ.get(key, "").strip() for key in keys)
-
-
-def _models() -> dict:
-    return {
-        role.lower(): {"provider": os.getenv(f"OMB_{role}_LLM", "gemini"), "model": os.getenv(f"OMB_{role}_MODEL")}
-        for role in ("ANSWER", "JUDGE")
-    }
-
-
-def _missing_models() -> list[str]:
-    missing = []
-    for role, config in _models().items():
-        keys = LLM_KEYS.get(config["provider"])
-        if not keys:
-            missing.append(f"OMB_{role.upper()}_LLM (gemini / openai / groq)")
-        elif not _configured(*keys):
-            missing.append(" / ".join(keys))
-    return list(dict.fromkeys(missing))
 
 
 def _now() -> str:
@@ -109,11 +84,11 @@ def _read_json(path: Path) -> dict:
         return {}
 
 
-def _connection_settings_path(output_dir: Path) -> Path:
+def _settings_path(output_dir: Path, filename: str) -> Path:
     configured_dir = os.environ.get("AMB_WORKBENCH_CONFIG_DIR")
     root = Path(configured_dir).expanduser() if configured_dir else Path.home() / ".config" / "amb" / "workbench"
     key = sha256(os.fsencode(output_dir)).hexdigest()
-    path = (root / key / "connections.json").resolve()
+    path = (root / key / filename).resolve()
     if path.is_relative_to(output_dir):
         raise ValueError("AMB_WORKBENCH_CONFIG_DIR must be outside the Workbench results directory.")
     return path
@@ -123,7 +98,10 @@ class RunManager:
     def __init__(self, root: Path):
         self.root = root.resolve()
         self.root.mkdir(parents=True, exist_ok=True)
-        self.connections = Connections(_connection_settings_path(self.root), legacy_path=self.root / ".connections.json")
+        self.connections = Connections(
+            _settings_path(self.root, "connections.json"), legacy_path=self.root / ".connections.json",
+        )
+        self.models = ModelSettings(_settings_path(self.root, "models.json"))
         self.lock = Lock()
         self.active: tuple[str, subprocess.Popen] | None = None
         self.cancelling = False
@@ -137,10 +115,9 @@ class RunManager:
             raise HTTPException(422, error)
         try:
             connection = self.connections.for_run(selection.backend, selection.connection)
+            models, model_env = self.models.for_run(selection.dataset, selection.models)
         except ValueError as exc:
             raise HTTPException(422, str(exc)) from exc
-        if missing := _missing_models():
-            raise HTTPException(422, "请先在服务器的 .env 中配置 " + "、".join(missing))
         with self.lock:
             if self.active:
                 raise HTTPException(409, "已有评测正在运行。")
@@ -150,18 +127,17 @@ class RunManager:
             job = {
                 "id": run_id,
                 "name": selection.name,
-                "selection": selection.model_dump(exclude={"name", "connection"}),
+                "selection": selection.model_dump(exclude={"name", "connection", "models"}),
                 "target": {"api_url": connection.api_url, "bank_id": connection.bank_id},
-                "models": _models(),
+                "models": models,
                 "status": "running",
                 "started_at": _now(),
             }
             write_json(directory / "run.json", job)
-            env = {**os.environ, **connection.worker_env(selection.backend), "NO_COLOR": "1", "PYTHONUNBUFFERED": "1"}
-            env.setdefault("OMB_ANSWER_LLM", "gemini")
-            env.setdefault("OMB_JUDGE_LLM", "gemini")
-            if env.get("GEMINI_API_KEY"):
-                env["GOOGLE_API_KEY"] = env["GEMINI_API_KEY"]
+            env = {
+                **os.environ, **connection.worker_env(selection.backend), **model_env,
+                "NO_COLOR": "1", "PYTHONUNBUFFERED": "1",
+            }
             try:
                 process = subprocess.Popen(
                     [sys.executable, "-m", "memory_bench.workbench_worker", str(directory)],
@@ -283,10 +259,12 @@ def create_app(output_dir: Path) -> FastAPI:
     @app.exception_handler(RequestValidationError)
     async def validation_error(request: Request, exc: RequestValidationError):
         if request.method == "POST" and request.url.path == "/api/runs":
-            return JSONResponse({"detail": "评测配置无效，请检查名称、类型和本轮连接。"}, status_code=422)
+            return JSONResponse({"detail": "评测配置无效，请检查名称、类型、本轮连接和模型。"}, status_code=422)
         if request.url.path.startswith("/api/connections/"):
             # FastAPI normally returns the invalid input, which may contain a key.
             return JSONResponse({"detail": "后端配置格式无效，请检查输入。"}, status_code=422)
+        if request.url.path.startswith("/api/models/"):
+            return JSONResponse({"detail": "模型配置格式无效，请检查提供方、模型 ID、地址和 Key。"}, status_code=422)
         return await request_validation_exception_handler(request, exc)
 
     @app.get("/")
@@ -301,8 +279,9 @@ def create_app(output_dir: Path) -> FastAPI:
                 split: error for split in BEAM_SPLITS if (error := _dataset_error("beam", split))
             }},
             "backends": manager.connections.public(),
-            "models": _models(),
-            "missing_models": _missing_models(),
+            "models": manager.models.public(),
+            "model_services": manager.models.services(),
+            "beam_default_judge_model": DEFAULT_JUDGE_MODEL,
         }
 
     @app.post("/api/connections/{backend}")
@@ -315,6 +294,17 @@ def create_app(output_dir: Path) -> FastAPI:
     @app.post("/api/connections/{backend}/reset")
     def reset_connection(backend: BackendId):
         return manager.connections.reset(backend)
+
+    @app.post("/api/models/{role}")
+    def save_model(role: Role, update: ModelInput):
+        try:
+            return manager.models.save(role, update)
+        except ValueError as exc:
+            raise HTTPException(422, str(exc)) from exc
+
+    @app.post("/api/models/{role}/reset")
+    def reset_model(role: Role):
+        return manager.models.reset(role)
 
     @app.get("/api/runs")
     def runs(limit: Annotated[int, Query(ge=1, le=100)] = 30, offset: Annotated[int, Query(ge=0)] = 0):

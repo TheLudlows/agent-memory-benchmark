@@ -28,6 +28,13 @@ dependencies = [
     "scipy>=1.11",
 ]
 
+# CLI and client dependencies for LoCoMo against an external Hindsight API.
+[dependency-groups]
+http-runner = [
+    "google-genai", "groq", "hindsight-client", "httpx", "openai",
+    "python-dotenv", "qdrant-client", "rank-bm25", "rich", "scipy", "tiktoken", "typer",
+]
+
 [project.scripts]
 amb = "memory_bench.cli:app"
 omb = "memory_bench.cli:app"  # legacy alias (pre-rename); prefer `amb`

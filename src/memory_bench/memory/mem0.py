@@ -1,8 +1,12 @@
+from __future__ import annotations
+
 import tempfile
 import uuid
 from pathlib import Path
+from typing import TYPE_CHECKING
 
-from mem0 import Memory
+if TYPE_CHECKING:
+    from mem0 import Memory
 
 from ..models import Document
 from .base import MemoryProvider
@@ -32,6 +36,7 @@ class Mem0MemoryProvider(MemoryProvider):
         self._memory = self._build_memory(str(qdrant_path))
 
     def _build_memory(self, qdrant_path: str) -> Memory:
+        from mem0 import Memory
         return Memory.from_config(
             {
                 "llm": {

@@ -1285,10 +1285,10 @@ class HindsightHTTPMemoryProvider(HindsightCloudMemoryProvider):
     def __init__(self):
         # Bypass HindsightCloudMemoryProvider.__init__ — no API key required.
         _HindsightBase.__init__(self)
-        from hindsight import HindsightClient
+        from hindsight_client import Hindsight
         self._cloud_api_key = os.environ.get("HINDSIGHT_HTTP_KEY", "")
         self._cloud_base_url = os.environ.get("HINDSIGHT_HTTP_URL", "http://localhost:8888")
-        self._client = HindsightClient(base_url=self._cloud_base_url, api_key=self._cloud_api_key)
+        self._client = Hindsight(base_url=self._cloud_base_url, api_key=self._cloud_api_key)
         # AMB_CONCURRENCY: queries answered at once; AMB_UNIT_CONCURRENCY: units (banks) ingested at once.
         if v := os.environ.get("AMB_CONCURRENCY"):
             self.concurrency = int(v)

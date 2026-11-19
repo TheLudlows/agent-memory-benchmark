@@ -4,11 +4,10 @@ import json
 import os
 import re
 from collections import Counter, defaultdict
+from functools import lru_cache
 from pathlib import Path
-from shutil import copyfileobj
-from urllib.request import urlopen
 
-from ._cache import dataset_cache_dir, staging_file
+from ..data_files import data_path, read_json
 from .base import Dataset
 from ..models import Document, Query
 
@@ -26,10 +25,6 @@ _SOURCES = {
     "phone_data/photo.json": "照片记录", "phone_data/push.json": "通知",
     "phone_data/sms.json": "短信",
 }
-_DATA_URL = (
-    "https://raw.githubusercontent.com/1754955896/LifeBench/"
-    "b4adbe3d0afa66efa4ab362e9d67160089f860dd/life_bench_data/version2/data"
-)
 _DAY = re.compile(r"\d{4}-\d{2}-\d{2}")
 _DOC_CHAR_LIMIT = 6000
 
@@ -46,6 +41,11 @@ def _timestamp(day: str) -> str | None:
     return f"{day}T00:00:00+08:00" if day else None
 
 
+@lru_cache(maxsize=1)
+def _bundled_user(user: str) -> dict:
+    return read_json(data_path("offline", "lifebench-v2", f"{user}.json.xz"))
+
+
 class LifeBenchV2Dataset(Dataset):
     name = "lifebench-v2"
     description = "LifeBench 2.0 Chinese multi-source memory: 10 users, 3,380 questions."
@@ -56,14 +56,9 @@ class LifeBenchV2Dataset(Dataset):
 
     def _read(self, user: str, file: str) -> list | dict:
         local_root = os.environ.get("LIFEBENCH_V2_DATA_PATH")
-        path = (Path(local_root).expanduser() if local_root else dataset_cache_dir(self.name)) / user / file
-        if not local_root and not path.is_file():
-            path.parent.mkdir(parents=True, exist_ok=True)
-            with staging_file(path) as temporary:
-                with urlopen(f"{_DATA_URL}/{user}/{file}", timeout=90) as source, temporary.open("wb") as target:
-                    copyfileobj(source, target)
-                return json.loads(temporary.read_text(encoding="utf-8"))
-        return json.loads(path.read_text(encoding="utf-8"))
+        if local_root:
+            return read_json(Path(local_root).expanduser() / user / file)
+        return _bundled_user(user)[file]
 
     def load_queries(
         self, split: str, category: str | None = None, limit: int | None = None,
@@ -107,8 +102,8 @@ class LifeBenchV2Dataset(Dataset):
                 if isinstance(records, dict):
                     # The profile stores each relationship history in a single list.
                     # Keep individual relationships intact when splitting the profile.
-                    relationships = records.pop("relation", [])
-                    records = [records, *({"relation": relation} for relation in relationships)]
+                    profile = {key: value for key, value in records.items() if key != "relation"}
+                    records = [profile, *({"relation": relation} for relation in records.get("relation", []))]
                 by_day: dict[str, list[str]] = defaultdict(list)
                 for record in records:
                     by_day[_day(record)].append(json.dumps(record, ensure_ascii=False, separators=(",", ":")))

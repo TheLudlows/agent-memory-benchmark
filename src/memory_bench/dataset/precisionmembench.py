@@ -58,24 +58,16 @@ to that commit. Reference port: garrytan/gbrain-evals `eval/precisionmembench/`.
 import json
 import os
 import re
-import urllib.request
 from collections import Counter
 from pathlib import Path
 
 from rich.console import Console
 from rich.table import Table
 
-from ._cache import dataset_cache_dir, staging_file
+from ..data_files import data_path, read_json
 from .base import Dataset
 from ..judge import ScoringError
 from ..models import Document, Query
-
-_COMMIT = "b95d6abb471c0d591c440172283dd74e7af000df"
-_RAW = f"https://raw.githubusercontent.com/tenurehq/precisionmembench/{_COMMIT}/fixtures"
-_FIXTURES = {
-    "beliefs.seed.json": f"{_RAW}/beliefs.seed.json",
-    "retrieval.cases.json": f"{_RAW}/retrieval.cases.json",
-}
 
 SPLITS = ["single-turn"]
 TOTAL_QUERIES = 77
@@ -200,7 +192,7 @@ class PrecisionMemBenchDataset(Dataset):
     """
     PrecisionMemBench — belief-ID-level retrieval precision benchmark.
 
-    Fixtures are auto-downloaded from GitHub (pinned commit) on first use.
+    The original fixtures are bundled with the repository.
     Set PRECISIONMEMBENCH_DATA_PATH to a directory holding beliefs.seed.json and
     retrieval.cases.json to use a local copy instead.
     """
@@ -227,16 +219,8 @@ class PrecisionMemBenchDataset(Dataset):
         if filename in self._cache:
             return self._cache[filename]
         env = os.environ.get("PRECISIONMEMBENCH_DATA_PATH")
-        path = Path(env).expanduser() / filename if env else dataset_cache_dir(self.name) / filename
-        if not path.exists():
-            if env:
-                raise FileNotFoundError(f"PRECISIONMEMBENCH_DATA_PATH set but {path} is missing")
-            Console().print(f"[dim]Downloading {filename} from upstream @ {_COMMIT[:7]}...[/dim]")
-            with staging_file(path) as temporary:
-                urllib.request.urlretrieve(_FIXTURES[filename], temporary)
-                data = json.loads(temporary.read_text(encoding="utf-8"))
-        else:
-            data = json.loads(path.read_text(encoding="utf-8"))
+        path = Path(env).expanduser() / filename if env else data_path("offline", self.name, filename)
+        data = read_json(path)
         self._cache[filename] = data
         return data
 

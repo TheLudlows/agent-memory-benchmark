@@ -389,11 +389,6 @@ def test_beam_workbench_requires_a_split_for_legacy_local_data(monkeypatch, tmp_
     monkeypatch.setenv("BEAM_DATA_PATH", str(local))
     dataset = BEAMDataset(require_local_split=True)
 
-    def download(split, path):
-        path.write_text(json.dumps([{"conversation_id": "download-" + split}]))
-
-    monkeypatch.setattr(dataset, "_cache_path", lambda split: tmp_path / f"cached-{split}.json")
-    monkeypatch.setattr(dataset, "_download", download)
     with TestClient(create_app(tmp_path / "runs"), base_url="http://127.0.0.1") as client:
         errors = client.get("/api/config").json()["split_errors"]["beam"]
         assert set(errors) == {"100k", "500k", "1m"}
@@ -407,7 +402,7 @@ def test_beam_workbench_requires_a_split_for_legacy_local_data(monkeypatch, tmp_
         monkeypatch.setenv("BEAM_DATA_SPLIT", "500k")
         assert client.get("/api/config").json()["split_errors"]["beam"] == {}
     assert dataset._load_raw("500k")[0]["conversation_id"] == "local-500k"
-    assert dataset._load_raw("100k")[0]["conversation_id"] == "download-100k"
+    assert len(dataset.load_queries("100k")) == 400
 
     split_file = tmp_path / "1m.json"
     split_file.write_text('[{"conversation_id":"local-1m"}]')

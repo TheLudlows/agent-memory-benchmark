@@ -7,8 +7,7 @@ conversation) across 10 memory ability categories.
 
 Paper: https://arxiv.org/abs/2510.27246
 
-Data is auto-downloaded from HuggingFace on first use and cached locally.
-Use BEAM_<SPLIT>_DATA_PATH to point at a local JSON file for that split.
+All four splits are bundled. BEAM_<SPLIT>_DATA_PATH can override a split.
 
 Structure
 ---------
@@ -31,14 +30,14 @@ import json
 import logging
 import os
 import re
-import urllib.request
+from collections import defaultdict
 from pathlib import Path
 
 from rich.console import Console
 from rich.table import Table
 from scipy.stats import kendalltau
 
-from ._cache import dataset_cache_dir, staging_file
+from ..data_files import data_path, read_json
 from .base import Dataset
 from ..judge import ScoringError
 from ..models import Document, Query, QueryResult
@@ -114,8 +113,7 @@ class BEAMDataset(Dataset):
     """
     BEAM benchmark — long-context memory capabilities.
 
-    Data is auto-downloaded from HuggingFace on first use.
-    Set BEAM_<SPLIT>_DATA_PATH to point at a local JSON file for that split.
+    Set BEAM_<SPLIT>_DATA_PATH to point at a different local copy.
     """
 
     name = "beam"
@@ -139,45 +137,43 @@ class BEAMDataset(Dataset):
     def __init__(self, *, require_local_split: bool = False):
         self._require_local_split = require_local_split
 
-    def _cache_path(self, split: str) -> Path:
-        cache = dataset_cache_dir("beam")
-        return cache / f"{split}.json"
-
-    def _load_raw(self, split: str) -> list[dict]:
+    def _load_raw(self, split: str) -> list[dict] | None:
         local = local_data_path(split, require_split=self._require_local_split)
-        if local:
-            with open(local, encoding="utf-8") as f:
-                return json.load(f)
+        return read_json(Path(local).expanduser()) if local else None
 
-        path = self._cache_path(split)
-        if not path.exists():
-            with staging_file(path) as temporary:
-                self._download(split, temporary)
-            print(f"Cached to {path}")
+    def _bundled_documents(
+        self, split: str, limit: int | None, ids: set[str] | None, user_ids: set[str] | None,
+    ) -> list[Document]:
+        # The checked-in transcript export predates per-session ingest metadata.
+        # The index slices the same transcripts at the current loader's boundaries.
+        index = read_json(data_path("offline", self.name, f"{split}.index.json.gz"))
+        selected = [user for user in index
+                    if (ids is None or user in ids) and (user_ids is None or user in user_ids)]
+        selected_ids = set(selected)
+        if not selected_ids:
+            return []
 
-        with open(path, encoding="utf-8") as f:
-            return json.load(f)
+        transcripts: dict[str, list[str]] = defaultdict(list)
+        for row in read_json(data_path(self.name, split, "documents.json.gz")):
+            if row["user_id"] in selected_ids:
+                transcripts[row["user_id"]].append(row["content"])
 
-    @staticmethod
-    def _download(split: str, dest: Path) -> None:
-        try:
-            from datasets import load_dataset
-        except ImportError as e:
-            raise ImportError(
-                "Install 'datasets' to auto-download BEAM: pip install datasets"
-            ) from e
-
-        if split == "10m":
-            hf_name, hf_split = "Mohammadta/BEAM-10M", "10M"
-        else:
-            hf_name  = "Mohammadta/BEAM"
-            hf_split = _HF_SPLIT_MAP[split]
-
-        print(f"Downloading BEAM {split} split from HuggingFace ({hf_name}, split={hf_split})…")
-        ds = load_dataset(hf_name, split=hf_split)
-        data = [dict(row) for row in ds]
-        with open(dest, "w", encoding="utf-8") as f:
-            json.dump(data, f)
+        docs = []
+        for user in selected:
+            transcript = "\n\n".join(transcripts[user])
+            parts = index[user]
+            if sum(length for _, length, _, _ in parts) + 2 * (len(parts) - 1) != len(transcript):
+                raise ValueError(f"Bundled BEAM {split} transcript and index do not match for {user}.")
+            pos = 0
+            for doc_id, length, timestamp, context in parts:
+                end = pos + length
+                docs.append(Document(
+                    id=doc_id, content=transcript[pos:end], user_id=user, timestamp=timestamp, context=context,
+                ))
+                if limit and ids is None and len(docs) >= limit:
+                    return docs
+                pos = end + 2
+        return docs
 
     @staticmethod
     def _parse_probing_questions(item: dict) -> dict[str, list[dict]]:
@@ -278,6 +274,8 @@ class BEAMDataset(Dataset):
         user_ids: set[str] | None = None,
     ) -> list[Document]:
         data = self._load_raw(split)
+        if data is None:
+            return self._bundled_documents(split, limit, ids, user_ids)
         documents: list[Document] = []
 
         for item in data:
@@ -391,6 +389,10 @@ class BEAMDataset(Dataset):
         limit: int | None = None,
     ) -> list[Query]:
         data = self._load_raw(split)
+        if data is None:
+            rows = read_json(data_path(self.name, split, "queries.json.gz"))
+            queries = [Query(**row) for row in rows if category is None or row["meta"]["question_category"] == category]
+            return queries[:limit] if limit else queries
         queries: list[Query] = []
 
         for item in data:
@@ -833,11 +835,16 @@ Return JSON: {{"score": <0.0 or 0.5 or 1.0>, "reason": "<one concise sentence>"}
         for split in SPLITS:
             try:
                 data = self._load_raw(split)
-                n_convs = len(data)
-                n_questions = sum(
-                    sum(len(v) for v in self._parse_probing_questions(item).values())
-                    for item in data
-                )
+                if data is None:
+                    queries = self.load_queries(split)
+                    n_convs = len({q.user_id for q in queries})
+                    n_questions = len(queries)
+                else:
+                    n_convs = len(data)
+                    n_questions = sum(
+                        sum(len(v) for v in self._parse_probing_questions(item).values())
+                        for item in data
+                    )
                 table.add_row(split, str(n_convs), str(n_questions))
             except Exception as e:
                 table.add_row(split, "—", f"error: {e}")

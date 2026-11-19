@@ -13,10 +13,8 @@
 body { margin: 0; }
 [hidden] { display: none !important; }
 .top { background: #172532; color: #fff; }
-.top-inner { max-width: 1248px; margin: 0 auto; padding: 12px 32px; display: flex; justify-content: space-between; align-items: center; gap: 16px; }
-.brand { display: flex; align-items: center; gap: 13px; font-weight: 650; letter-spacing: .01em; }
-.brand-mark { display: inline-block; padding: 3px 9px; background: #a3ead7; color: #163b35; font: 750 14px/1.6 ui-monospace, monospace; border-radius: 4px; }
-.top-note { color: #c6d3dc; font-size: .84rem; white-space: nowrap; }
+.top-inner { max-width: 1248px; margin: 0 auto; padding: 12px 32px; }
+.brand { font-weight: 650; letter-spacing: .01em; }
 main { max-width: 1248px; margin: auto; padding: 40px 32px 56px; }
 .intro { margin-bottom: 27px; }
 h1, h2, h3, p { margin: 0; }

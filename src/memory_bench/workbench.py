@@ -14,6 +14,8 @@ from uuid import uuid4
 
 from anyio import open_file
 from fastapi import FastAPI, HTTPException, Request
+from fastapi.exception_handlers import request_validation_exception_handler
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -22,16 +24,12 @@ from starlette.middleware.trustedhost import TrustedHostMiddleware
 from .dataset.beam import SPLITS as BEAM_SPLITS, local_data_path as beam_local_data_path
 from .dataset.locomo import SPLITS as LOCOMO_SPLITS
 from .dataset.longmemeval import SPLITS as LONGMEMEVAL_SPLITS
+from .workbench_connections import BackendId, Connections, ConnectionUpdate
 
 DATASETS = {
     "locomo": LOCOMO_SPLITS,
     "beam": BEAM_SPLITS,
     "longmemeval": LONGMEMEVAL_SPLITS,
-}
-BACKENDS = {
-    "contextbase": "ContextBase",
-    "mem0-cloud": "Mem0 Cloud",
-    "hindsight-http": "Hindsight HTTP",
 }
 LLM_KEYS = {
     "gemini": ("GEMINI_API_KEY", "GOOGLE_API_KEY"),
@@ -47,7 +45,7 @@ class RunSelection(BaseModel):
     model_config = ConfigDict(extra="forbid")
     dataset: Literal["locomo", "beam", "longmemeval"]
     split: str
-    backend: Literal["contextbase", "mem0-cloud", "hindsight-http"]
+    backend: BackendId
     query_limit: int | None = Field(default=5, ge=1, strict=True)
 
     @model_validator(mode="after")
@@ -68,17 +66,6 @@ def _dataset_error(dataset: str, split: str) -> str | None:
 
 def _configured(*keys: str) -> bool:
     return any(os.environ.get(key, "").strip() for key in keys)
-
-
-def _missing_backend(backend: str) -> list[str]:
-    if backend == "contextbase":
-        missing = [key for key in ("CONTEXTBASE_API_URL", "CONTEXTBASE_API_TOKEN") if not _configured(key)]
-        if not _configured("CONTEXTBASE_BANK_ID", "CONTEXTBASE_BENCH_BANKS"):
-            missing.append("CONTEXTBASE_BANK_ID / CONTEXTBASE_BENCH_BANKS")
-        return missing
-    if backend == "mem0-cloud" and not _configured("MEM0_CLOUD_KEY", "MEM0_API_KEY"):
-        return ["MEM0_CLOUD_KEY / MEM0_API_KEY"]
-    return []
 
 
 def _models() -> dict:
@@ -120,6 +107,7 @@ class RunManager:
     def __init__(self, root: Path):
         self.root = root.resolve()
         self.root.mkdir(parents=True, exist_ok=True)
+        self.connections = Connections(self.root / ".connections.json")
         self.lock = Lock()
         self.active: tuple[str, subprocess.Popen] | None = None
         self.cancelling = False
@@ -131,8 +119,11 @@ class RunManager:
     def start(self, selection: RunSelection) -> dict:
         if error := _dataset_error(selection.dataset, selection.split):
             raise HTTPException(422, error)
-        missing = _missing_backend(selection.backend) + _missing_models()
-        if missing:
+        try:
+            backend_env = self.connections.worker_env(selection.backend)
+        except ValueError as exc:
+            raise HTTPException(422, str(exc)) from exc
+        if missing := _missing_models():
             raise HTTPException(422, "请先在服务器的 .env 中配置 " + "、".join(missing))
         with self.lock:
             if self.active:
@@ -148,7 +139,7 @@ class RunManager:
                 "started_at": _now(),
             }
             write_json(directory / "run.json", job)
-            env = {**os.environ, "NO_COLOR": "1", "PYTHONUNBUFFERED": "1"}
+            env = {**os.environ, **backend_env, "NO_COLOR": "1", "PYTHONUNBUFFERED": "1"}
             env.setdefault("OMB_ANSWER_LLM", "gemini")
             env.setdefault("OMB_JUDGE_LLM", "gemini")
             if env.get("GEMINI_API_KEY"):
@@ -271,6 +262,13 @@ def create_app(output_dir: Path) -> FastAPI:
         response.headers["Cache-Control"] = "no-store"
         return response
 
+    @app.exception_handler(RequestValidationError)
+    async def validation_error(request: Request, exc: RequestValidationError):
+        if request.url.path.startswith("/api/connections/"):
+            # FastAPI normally returns the invalid input, which may contain a key.
+            return JSONResponse({"detail": "后端配置格式无效，请检查输入。"}, status_code=422)
+        return await request_validation_exception_handler(request, exc)
+
     @app.get("/")
     def home():
         return FileResponse(ASSETS / "index.html")
@@ -282,10 +280,21 @@ def create_app(output_dir: Path) -> FastAPI:
             "split_errors": {"beam": {
                 split: error for split in BEAM_SPLITS if (error := _dataset_error("beam", split))
             }},
-            "backends": {name: {"label": label, "missing": _missing_backend(name)} for name, label in BACKENDS.items()},
+            "backends": manager.connections.public(),
             "models": _models(),
             "missing_models": _missing_models(),
         }
+
+    @app.post("/api/connections/{backend}")
+    def save_connection(backend: BackendId, update: ConnectionUpdate):
+        try:
+            return manager.connections.save(backend, update)
+        except ValueError as exc:
+            raise HTTPException(422, str(exc)) from exc
+
+    @app.post("/api/connections/{backend}/reset")
+    def reset_connection(backend: BackendId):
+        return manager.connections.reset(backend)
 
     @app.get("/api/runs")
     def runs():

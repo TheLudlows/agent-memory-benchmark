@@ -30,6 +30,25 @@
           <label for="backend">记忆后端</label>
           <select id="backend" name="backend" required></select>
           <p class="hint" id="backend-help"></p>
+          <details id="connection-panel" class="connection-panel" hidden>
+            <summary>连接配置 <span id="connection-status"></span></summary>
+            <label for="connection-url">API 地址</label>
+            <input id="connection-url" type="url" maxlength="2048" placeholder="https://example.com">
+            <div id="connection-bank-row" hidden>
+              <label for="connection-bank">Bank ID</label>
+              <input id="connection-bank" type="text" maxlength="256" placeholder="已授权的测试 Bank">
+            </div>
+            <label for="connection-key">API Key</label>
+            <input id="connection-key" type="password" maxlength="4096" autocomplete="new-password">
+            <label id="connection-clear-row" class="check" hidden>
+              <input id="connection-clear" type="checkbox"> 清除已配置的 Key
+            </label>
+            <div class="connection-actions">
+              <button id="connection-save" type="button" class="secondary">保存连接</button>
+              <button id="connection-reset" type="button" class="secondary" hidden>恢复默认配置</button>
+            </div>
+            <p id="connection-message" class="hint" aria-live="polite" hidden></p>
+          </details>
           <label for="limit">题目数</label>
           <div class="limit-row">
             <input id="limit" name="limit" type="number" min="1" step="1" value="5" required>

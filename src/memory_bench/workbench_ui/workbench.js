@@ -9,6 +9,8 @@ let settings;
 let selected;
 let jobs = [];
 let submitting = false;
+let connectionDirty = false;
+let savingConnection = false;
 
 async function api(path, options) {
   const response = await fetch(`/api${path}`, options);
@@ -34,18 +36,71 @@ function updateSplits() {
   updateForm();
 }
 
+function loadConnection() {
+  const backend = $("backend").value;
+  const config = settings.backends[backend];
+  $("connection-panel").hidden = false;
+  $("connection-panel").open = config.missing.length > 0;
+  $("connection-url").value = config.api_url;
+  $("connection-bank-row").hidden = backend !== "contextbase";
+  $("connection-bank").placeholder = config.has_bank_mapping ? "使用已有 Bank 映射" : "已授权的测试 Bank";
+  $("connection-bank").value = config.bank_id;
+  $("connection-key").value = "";
+  $("connection-key").placeholder = config.has_key ? "已配置，留空保留" : config.key_optional ? "选填" : "请输入 API Key";
+  $("connection-clear-row").hidden = !config.key_optional || !config.has_key;
+  $("connection-clear").checked = false;
+  $("connection-reset").hidden = !config.saved;
+  connectionDirty = false;
+  setError("connection-message", "");
+  updateForm();
+}
+
+async function saveConnection(reset = false) {
+  if (savingConnection) return;
+  const backend = $("backend").value;
+  const apiKey = $("connection-key").value;
+  const clearKey = !$("connection-clear-row").hidden && $("connection-clear").checked;
+  const data = {
+    api_url: $("connection-url").value,
+    bank_id: backend === "contextbase" ? $("connection-bank").value : "",
+    api_key: apiKey || null,
+    clear_key: clearKey,
+  };
+  savingConnection = true;
+  updateForm();
+  const send = reset ? {} : { headers: {"Content-Type": "application/json"}, body: JSON.stringify(data) };
+  try {
+    settings.backends[backend] = await api(`/connections/${backend}${reset ? "/reset" : ""}`, { method: "POST", ...send });
+    loadConnection();
+    $("connection-panel").open = true;
+    setError("connection-message", reset ? "已恢复默认配置。" : "已保存连接。");
+  } catch (error) {
+    setError("connection-message", error.message);
+  } finally {
+    savingConnection = false;
+    updateForm();
+  }
+}
+
 function updateForm() {
   if (!settings) return;
-  const { missing } = settings.backends[$("backend").value];
+  const connection = settings.backends[$("backend").value];
   const descriptions = {
     "contextbase": "使用预先授权的测试 Bank。",
     "mem0-cloud": "使用 Mem0 托管 API。",
     "hindsight-http": "连接已启动的 Hindsight API。",
   };
   $("backend-help").textContent = descriptions[$("backend").value];
-  const missingKeys = [...missing, ...settings.missing_models];
   const splitError = settings.split_errors?.[$("dataset").value]?.[$("split").value];
-  setError("config-error", splitError || (missingKeys.length ? `请在 .env 配置 ${missingKeys.join("、")}` : ""));
+  const backendError = connectionDirty ? "请先保存连接配置。" :
+    connection.missing.length ? `请配置后端的 ${connection.missing.join("、")}。` : "";
+  const modelError = settings.missing_models.length ? `请在 .env 配置 ${settings.missing_models.join("、")}` : "";
+  setError("config-error", splitError || backendError || modelError);
+  $("connection-status").textContent = connectionDirty ? "未保存" : connection.missing.length ? "待配置" : "已配置";
+  for (const id of ["backend", "connection-url", "connection-bank", "connection-clear", "connection-save", "connection-reset"]) {
+    $(id).disabled = savingConnection;
+  }
+  $("connection-key").disabled = savingConnection || $("connection-clear").checked;
   for (const role of ["answer", "judge"]) {
     const { provider, model } = settings.models[role];
     const fallback = provider === "gemini" && role === "judge" && $("dataset").value === "beam"
@@ -53,7 +108,7 @@ function updateForm() {
     $(`${role}-model`).textContent = `${provider} · ${model || fallback}`;
   }
   $("limit").disabled = $("full").checked;
-  $("start").disabled = submitting || jobs.some(isActive) || Boolean(splitError) || missingKeys.length > 0;
+  $("start").disabled = submitting || savingConnection || jobs.some(isActive) || Boolean(splitError || backendError || modelError);
   $("start").textContent = submitting ? "正在启动…" : jobs.some(isActive) ? "已有评测运行中" : "开始评测";
 }
 
@@ -154,6 +209,7 @@ async function poll() {
 
 $("run-form").addEventListener("submit", async (event) => {
   event.preventDefault();
+  if ($("start").disabled) return;
   setError("form-error", "");
   submitting = true;
   updateForm();
@@ -190,7 +246,17 @@ $("cancel").addEventListener("click", async () => {
 
 $("dataset").addEventListener("change", updateSplits);
 $("split").addEventListener("change", updateForm);
-$("backend").addEventListener("change", updateForm);
+$("backend").addEventListener("change", loadConnection);
+for (const id of ["connection-url", "connection-bank", "connection-key", "connection-clear"]) {
+  $(id).addEventListener("input", () => {
+    if (id === "connection-clear" && $("connection-clear").checked) $("connection-key").value = "";
+    connectionDirty = true;
+    setError("connection-message", "");
+    updateForm();
+  });
+}
+$("connection-save").addEventListener("click", () => saveConnection());
+$("connection-reset").addEventListener("click", () => saveConnection(true));
 $("full").addEventListener("change", updateForm);
 
 async function init() {
@@ -198,6 +264,7 @@ async function init() {
     settings = await api("/config");
     options("dataset", Object.keys(settings.datasets).map((key) => [key, names[key]]));
     options("backend", Object.entries(settings.backends).map(([key, value]) => [key, value.label]));
+    loadConnection();
     updateSplits();
     await poll();
   } catch (error) {

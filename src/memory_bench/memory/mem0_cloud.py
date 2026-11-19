@@ -28,7 +28,7 @@ class Mem0CloudMemoryProvider(MemoryProvider):
         if self._client is None:
             from mem0 import MemoryClient
             api_key = os.environ.get("MEM0_CLOUD_KEY") or os.environ["MEM0_API_KEY"]
-            self._client = MemoryClient(api_key=api_key)
+            self._client = MemoryClient(api_key=api_key, host=os.environ.get("MEM0_CLOUD_URL") or None)
         return self._client
 
     def ingest(self, documents: list[Document]) -> None:

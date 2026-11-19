@@ -55,6 +55,9 @@ def mock_services():
                     values["score"] = 0.0
                 self.send_json({"choices": [{"message": {"content": json.dumps({key: values[key] for key in schema})}}]})
             elif self.path.endswith("/memories"):
+                if self.headers.get("Authorization") != "Bearer test-bearer-value" or "/banks/ui-bank/" not in self.path:
+                    self.send_json({"error": "Incorrect Workbench backend configuration"}, status=403)
+                    return
                 self.send_json({"success": True, "async": True, "items_count": len(body["items"]), "operation_id": "test-op"})
             elif self.path.endswith("/memories/recall"):
                 empty_queries = {"No memory?", "What did they say about pets?", "What is their salary?"}
@@ -79,9 +82,6 @@ def mock_services():
 def test_datasets_run_through_local_api_and_worker(monkeypatch, tmp_path, mock_services):
     endpoint, calls = mock_services
     options = {
-        "CONTEXTBASE_API_URL": endpoint,
-        "CONTEXTBASE_API_TOKEN": "test-bearer-value",
-        "CONTEXTBASE_BANK_ID": "bench-bank",
         "OPENAI_API_KEY": "test-model-key",
         "OPENAI_BASE_URL": endpoint + "/v1",
         "OMB_ANSWER_LLM": "openai",
@@ -91,7 +91,8 @@ def test_datasets_run_through_local_api_and_worker(monkeypatch, tmp_path, mock_s
     }
     for key, value in options.items():
         monkeypatch.setenv(key, value)
-    monkeypatch.delenv("CONTEXTBASE_BENCH_BANKS", raising=False)
+    for name in ("CONTEXTBASE_API_URL", "CONTEXTBASE_API_TOKEN", "CONTEXTBASE_BANK_ID", "CONTEXTBASE_BENCH_BANKS"):
+        monkeypatch.delenv(name, raising=False)
     for name in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy"):
         monkeypatch.delenv(name, raising=False)
     monkeypatch.setenv("PYTHONPATH", str(Path(__file__).resolve().parents[1] / "src"))
@@ -144,7 +145,13 @@ def test_datasets_run_through_local_api_and_worker(monkeypatch, tmp_path, mock_s
         config = client.get("/api/config").json()
         assert set(config["datasets"]) == {case[0] for case in fixtures}
         assert set(config["backends"]) == {"contextbase", "mem0-cloud", "hindsight-http"}
-        assert options["CONTEXTBASE_API_TOKEN"] not in json.dumps(config)
+        assert config["backends"]["contextbase"]["missing"] == ["API 地址", "API Key", "Bank ID"]
+        response = client.post("/api/connections/contextbase", json={
+            "api_url": endpoint, "api_key": "test-bearer-value", "bank_id": "ui-bank",
+        })
+        assert response.status_code == 200, response.text
+        assert response.json()["missing"] == []
+        assert "test-bearer-value" not in response.text
 
         for dataset, split, variable, data in fixtures:
             dataset_path = tmp_path / f"{dataset}.json"
@@ -164,6 +171,7 @@ def test_datasets_run_through_local_api_and_worker(monkeypatch, tmp_path, mock_s
             assert detail["summary"]["judge_llm"] == "openai:judge-stub"
             assert detail["summary"]["ingested_docs"] == (2 if dataset == "longmemeval" else 1)
             assert detail["result_available"]
+            assert "test-bearer-value" not in json.dumps(detail)
             result = client.get(detail_url + "/result")
             assert "attachment" in result.headers["Content-Disposition"]
             rows = result.json()["results"]
@@ -372,3 +380,62 @@ def test_beam_can_rejudge_a_legacy_empty_context_abstention(monkeypatch, tmp_pat
     assert summary.accuracy == 1.0
     assert summary.scoring_failed_queries == 0
     assert summary.results[0].correct
+
+
+def test_workbench_connections_can_be_saved_and_reset(monkeypatch, tmp_path):
+    monkeypatch.setenv("HINDSIGHT_HTTP_URL", "http://127.0.0.1:8888/")
+    monkeypatch.setenv("HINDSIGHT_HTTP_KEY", "environment-secret")
+    monkeypatch.delenv("MEM0_CLOUD_KEY", raising=False)
+    monkeypatch.delenv("MEM0_API_KEY", raising=False)
+    monkeypatch.delenv("MEM0_CLOUD_URL", raising=False)
+    directory = tmp_path / "runs"
+
+    with TestClient(create_app(directory), base_url="http://127.0.0.1") as client:
+        config = client.get("/api/config")
+        assert "environment-secret" not in config.text
+        assert config.json()["backends"]["hindsight-http"]["has_key"]
+        assert config.json()["backends"]["mem0-cloud"]["api_url"] == "https://api.mem0.ai"
+
+        config_path = "/api/connections/hindsight-http"
+        changed_url = {"api_url": "http://127.0.0.1:9250"}
+        assert client.post(config_path, json=changed_url).status_code == 422
+        response = client.post(config_path, json={**changed_url, "clear_key": True})
+        assert response.status_code == 200
+        assert response.json()["has_key"] is False
+        response = client.post(config_path, json={**changed_url, "api_key": "new-hindsight-secret"})
+        assert response.status_code == 200 and response.json()["has_key"]
+        assert "new-hindsight-secret" not in response.text
+
+        mem0_path = "/api/connections/mem0-cloud"
+        mem0 = {"api_url": "https://example.test/mem0", "api_key": "mem0-private-token"}
+        blocked = client.post(mem0_path, json=mem0, headers={"Origin": "https://elsewhere.example"})
+        assert blocked.status_code == 403
+        invalid = client.post(mem0_path, json={**mem0, "api_key": {"secret": mem0["api_key"]}})
+        assert invalid.status_code == 422 and mem0["api_key"] not in invalid.text
+        invalid = client.post(mem0_path, json={**mem0, "api_url": "https://example.test/?key=key-in-url"})
+        assert invalid.status_code == 422 and "key-in-url" not in invalid.text
+        saved = client.post(mem0_path, json=mem0)
+        assert saved.status_code == 200 and saved.json()["has_key"]
+        assert mem0["api_key"] not in saved.text
+
+    with TestClient(create_app(directory), base_url="http://127.0.0.1") as client:
+        backends = client.get("/api/config").json()["backends"]
+        assert backends["mem0-cloud"]["api_url"] == "https://example.test/mem0"
+        assert backends["mem0-cloud"]["has_key"]
+        assert backends["hindsight-http"]["api_url"] == "http://127.0.0.1:9250"
+        reset = client.post(config_path + "/reset").json()
+        assert reset["api_url"] == "http://127.0.0.1:8888" and not reset["saved"]
+        assert reset["has_key"]
+        storage = directory / ".connections.json"
+        assert "new-hindsight-secret" not in storage.read_text(encoding="utf-8")
+
+
+def test_mem0_client_uses_configured_host(monkeypatch):
+    import mem0
+
+    monkeypatch.setenv("MEM0_CLOUD_URL", "https://example.test/mem0")
+    monkeypatch.setenv("MEM0_CLOUD_KEY", "test-api-key")
+    calls = []
+    monkeypatch.setattr(mem0, "MemoryClient", lambda **kwargs: calls.append(kwargs))
+    Mem0CloudMemoryProvider()._ensure_client()
+    assert calls == [{"api_key": "test-api-key", "host": "https://example.test/mem0"}]

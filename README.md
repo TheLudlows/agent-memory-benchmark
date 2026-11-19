@@ -103,19 +103,25 @@ uv run amb view
 或下载 AMB 逐题结果 JSON。
 
 1. 复制 `.env.example` 为 `.env`，填写回答和评分模型所用的 API Key。默认两者使用 Gemini。
-2. 在同一份 `.env` 中配置要使用的后端：
-
-   | 后端 | 配置 |
-   |---|---|
-   | ContextBase | `CONTEXTBASE_API_URL`、`CONTEXTBASE_API_TOKEN` 和已授权的 `CONTEXTBASE_BANK_ID` |
-   | Mem0 Cloud | `MEM0_CLOUD_KEY`（或 `MEM0_API_KEY`） |
-   | Hindsight HTTP | `HINDSIGHT_HTTP_URL`，开启鉴权时填 `HINDSIGHT_HTTP_KEY` |
-
-3. 启动浏览器评测台并打开 http://127.0.0.1:8090：
+2. 启动评测台并打开 http://127.0.0.1:8090：
 
    ```sh
    docker compose up --build amb-web
    ```
+
+3. 在页面选择记忆后端，展开「连接配置」，填好后点击「保存连接」。
+
+   | 后端 | 页面配置 |
+   |---|---|
+   | ContextBase | API 地址、可读写的业务 API Key、已授权的测试 Bank ID |
+   | Mem0 Cloud | API 地址（默认 `https://api.mem0.ai`）和 API Key，替换地址时需兼容 Mem0 Cloud API |
+   | Hindsight HTTP | API 地址，开启鉴权时填写 API Key |
+
+评测台优先使用网页保存的后端设置。也可以通过 `.env` 提供默认值：ContextBase 使用
+`CONTEXTBASE_API_URL`、`CONTEXTBASE_API_TOKEN`、`CONTEXTBASE_BANK_ID`；Mem0 使用 `MEM0_CLOUD_URL`、
+`MEM0_CLOUD_KEY`（或 `MEM0_API_KEY`）；Hindsight 使用 `HINDSIGHT_HTTP_URL`、`HINDSIGHT_HTTP_KEY`。
+页面的「恢复默认配置」会删除该后端保存的连接，再读取这些默认值。网页设置保存在评测台运行目录的
+`.connections.json`，重启后仍可使用。页面只显示 Key 是否已配置，改地址时需要重新填写 Key。
 
 也可以在仓库根目录直接运行 `uv run amb workbench`。本地直跑时，同机 Hindsight 的地址通常是
 `http://127.0.0.1:8888`。Docker 中连接宿主机用 `http://host.docker.internal:8888`，并确保 API

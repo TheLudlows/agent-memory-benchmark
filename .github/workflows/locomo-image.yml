@@ -68,7 +68,8 @@ jobs:
         run: docker compose up --build --detach amb-web
       - name: Verify Workbench HTTP and static UI
         run: |
-          curl --fail --silent --show-error --retry 15 --retry-connrefused --retry-delay 2 \
+          curl --fail --silent --show-error --connect-timeout 2 --max-time 5 \
+            --retry 15 --retry-all-errors --retry-delay 2 --retry-max-time 40 \
             http://127.0.0.1:8090/api/config -o "$RUNNER_TEMP/workbench-config.json"
           python -c "import json, sys; assert 'contextbase' in json.load(open(sys.argv[1]))['backends']" \
             "$RUNNER_TEMP/workbench-config.json"

@@ -35,6 +35,7 @@ input:disabled { background: #f2f5f6; }
 input[type=checkbox], progress { accent-color: var(--accent); }
 .limit-row { display: flex; align-items: center; gap: 16px; }
 .limit-row input[type=number] { min-width: 0; }
+.limit-row output { flex: 1; padding: 8px 10px; font-weight: 650; font-variant-numeric: tabular-nums; }
 .check { white-space: nowrap; display: flex; align-items: center; gap: 4px; }
 .hint { font-size: .85rem; margin-top: 6px; }
 .models { margin: 18px 0; border-block: 1px solid var(--border); padding: 10px 0; font-size: .85rem; display: grid; gap: 5px; }

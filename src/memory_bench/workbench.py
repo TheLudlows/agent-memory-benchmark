@@ -22,7 +22,8 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, Field, StringConstraints, model_validator
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
-from .dataset.beam import SPLITS as BEAM_SPLITS, local_data_path as beam_local_data_path
+from .dataset import get_dataset
+from .dataset.beam import BEAMDataset, SPLITS as BEAM_SPLITS, local_data_path as beam_local_data_path
 from .dataset.locomo import SPLITS as LOCOMO_SPLITS
 from .dataset.longmemeval import SPLITS as LONGMEMEVAL_SPLITS
 from .workbench_connections import BackendId, Connections, ConnectionUpdate, RunConnection
@@ -31,6 +32,13 @@ DATASETS = {
     "locomo": LOCOMO_SPLITS,
     "beam": BEAM_SPLITS,
     "longmemeval": LONGMEMEVAL_SPLITS,
+}
+# Counts from data/<dataset>/<split>/stats.json.gz. Previews of the standard
+# splits should be available before the evaluation downloads their corpora.
+STANDARD_QUERY_COUNTS = {
+    "locomo": {"locomo10": 1540},
+    "beam": {"100k": 400, "500k": 700, "1m": 700, "10m": 200},
+    "longmemeval": {"s": 500},
 }
 LLM_KEYS = {
     "gemini": ("GEMINI_API_KEY", "GOOGLE_API_KEY"),
@@ -304,6 +312,22 @@ def create_app(output_dir: Path) -> FastAPI:
             "models": _models(),
             "missing_models": _missing_models(),
         }
+
+    @app.get("/api/datasets/{dataset}/{split}/query-count")
+    def dataset_query_count(dataset: str, split: str):
+        if split not in DATASETS.get(dataset, ()):
+            raise HTTPException(404, "评测数据集或 split 不可用。")
+        try:
+            if dataset == "beam":
+                local_path = beam_local_data_path(split, require_split=True)
+                loader = BEAMDataset(require_local_split=True)
+            else:
+                local_path = os.getenv(f"{dataset.upper()}_DATA_PATH")
+                loader = get_dataset(dataset)
+            count = len(loader.load_queries(split)) if local_path else STANDARD_QUERY_COUNTS[dataset][split]
+        except (OSError, ValueError, TypeError, KeyError, AttributeError) as exc:
+            raise HTTPException(422, "无法读取本地评测数据的题数。") from exc
+        return {"query_count": count}
 
     @app.post("/api/connections/{backend}")
     def save_connection(backend: BackendId, update: ConnectionUpdate):

@@ -113,8 +113,9 @@ uv run amb view
    docker compose up --build amb-web
    ```
 
-3. 在「本轮连接」填写 API 地址和 Key。若要复用同一地址已有的 Key，显式勾选「使用该地址已保存的 Key」。
-   每轮的历史记录包含名称、数据集、后端和实际使用的地址。单次输入的 Key 不写入历史或结果。
+3. 在「本轮连接」选择已有地址，或填写新地址和 Key。发起评测时按后端和地址自动保存连接，下次默认选中
+   该后端最近使用的地址。选择其他地址会带出对应的 Bank ID 和 Key 设置，填写新 Key 可更新该地址的 Key。
+   每轮的历史记录包含名称、数据集、后端和实际使用的地址。Key 保存在服务端的连接配置中，评测历史和结果不含 Key。
 
    | 后端 | 页面配置 |
    |---|---|
@@ -122,13 +123,13 @@ uv run amb view
    | Mem0 Cloud | API 地址（默认 `https://api.mem0.ai`）和 API Key，替换地址时需兼容 Mem0 Cloud API |
    | Hindsight HTTP | API 地址，开启鉴权时填写 API Key |
 
-点击「保存为默认连接」可为后续评测预填地址。也可以通过 `.env` 提供默认值：ContextBase 使用
+也可以通过 `.env` 提供初始连接。ContextBase 使用
 `CONTEXTBASE_API_URL`、`CONTEXTBASE_API_TOKEN`、`CONTEXTBASE_BANK_ID`；Mem0 使用 `MEM0_CLOUD_URL`、
 `MEM0_CLOUD_KEY`（或 `MEM0_API_KEY`）；Hindsight 使用 `HINDSIGHT_HTTP_URL`、`HINDSIGHT_HTTP_KEY`。
-页面的「恢复初始配置」会删除该后端保存的连接，再读取这些默认值。默认连接保存在结果目录之外，
+连接配置保存在结果目录之外，
 直接运行时使用 `~/.config/amb/workbench/`（可用 `AMB_WORKBENCH_CONFIG_DIR` 指定私有配置目录），
 Docker Compose 使用独立的 `amb-workbench-config` 卷。升级后，旧的 `.connections.json` 会自动迁移并从
-结果目录移除。页面只显示 Key 是否已配置，改地址时需要重新填写 Key。
+结果目录移除。选择「输入新地址」后，可填写适用于该地址的 Key。Hindsight 无需鉴权时可取消使用该地址的 Key。
 
 也可以在仓库根目录直接运行 `uv run amb workbench`。本地直跑时，同机 Hindsight 的地址通常是
 `http://127.0.0.1:8888`。Docker 中连接宿主机用 `http://host.docker.internal:8888`，并确保 API

@@ -19,7 +19,6 @@ let historyOffset = 0;
 let hasNextPage = false;
 let activeJob = false;
 let submitting = false;
-let savingConnection = false;
 let questionCountVersion = 0;
 
 const modelRoles = { answer: "回答模型", judge: "评分模型" };
@@ -75,56 +74,37 @@ async function updateQuestionCount() {
 
 function loadConnection() {
   const backend = $("backend").value;
-  const config = settings.backends[backend];
+  const { connections } = settings.backends[backend];
+  const addresses = connections.map(({ api_url }) => [api_url, api_url]);
+  options("connection-address", [...addresses, ["", "输入新地址"]]);
   $("connection-panel").hidden = false;
-  $("connection-url").value = config.api_url;
+  $("connection-address-row").hidden = addresses.length === 0;
   $("connection-bank-row").hidden = backend !== "contextbase";
-  $("connection-bank").placeholder = config.has_bank_mapping ? "使用已有 Bank 映射" : "已授权的测试 Bank";
-  $("connection-bank").value = config.bank_id;
-  $("connection-reset").hidden = !config.saved;
-  $("connection-clear-default").hidden = !config.key_optional || !config.has_key;
-  clearRunKey();
-  setError("connection-message", "");
-  updateForm();
+  selectConnection();
 }
 
-function clearRunKey() {
+function selectedConnection() {
+  const { connections } = settings.backends[$("backend").value];
+  return connections.find(({ api_url }) => api_url === $("connection-address").value);
+}
+
+function selectConnection() {
+  const connection = selectedConnection();
+  $("connection-url-row").hidden = Boolean(connection);
+  $("connection-url").value = "";
+  $("connection-bank").placeholder = connection?.has_bank_mapping ? "使用已有 Bank 映射" : "已授权的测试 Bank";
+  $("connection-bank").value = connection?.bank_id || "";
   $("connection-key").value = "";
-  $("connection-reuse").checked = false;
+  $("connection-reuse").checked = Boolean(connection?.has_key);
+  updateForm();
 }
 
 function connectionInput() {
   return {
-    api_url: $("connection-url").value.trim(),
+    api_url: $("connection-address").value || $("connection-url").value.trim(),
     bank_id: $("backend").value === "contextbase" ? $("connection-bank").value.trim() : "",
     api_key: $("connection-key").value.trim() || null,
   };
-}
-
-async function saveConnection(action = "save") {
-  const reset = action === "reset";
-  const clear = action === "clear";
-  if (savingConnection) return;
-  const backend = $("backend").value;
-  const data = connectionInput();
-  if (clear) {
-    data.api_key = null;
-    data.clear_key = true;
-  }
-  savingConnection = true;
-  updateForm();
-  const send = reset ? {} : { headers: {"Content-Type": "application/json"}, body: JSON.stringify(data) };
-  try {
-    settings.backends[backend] = await api(`/connections/${backend}${reset ? "/reset" : ""}`, { method: "POST", ...send });
-    loadConnection();
-    setError("connection-message", reset ? "已恢复初始配置。" :
-      clear ? "已清除默认 Key。" : "已保存为默认连接。本轮仍可单独填写。");
-  } catch (error) {
-    setError("connection-message", error.message);
-  } finally {
-    savingConnection = false;
-    updateForm();
-  }
 }
 
 function defaultModel(role, provider) {
@@ -272,18 +252,16 @@ function updateForm() {
   const backend = $("backend").value;
   const config = settings.backends[backend];
   const connection = connectionInput();
+  const saved = selectedConnection();
   const descriptions = {
     "contextbase": "使用预先授权的测试 Bank。",
     "mem0-cloud": "使用 Mem0 Cloud 兼容 API。",
     "hindsight-http": "连接已启动的 Hindsight API。",
   };
   $("backend-help").textContent = descriptions[backend];
-  const sameUrl = connection.api_url.replace(/\/+$/, "") === config.api_url;
-  const canReuseKey = sameUrl && config.has_key;
-  if (!canReuseKey) $("connection-reuse").checked = false;
-  $("connection-reuse-row").hidden = !canReuseKey;
-  $("connection-key").placeholder = config.key_optional ? "选填" : "请输入本轮 API Key";
-  const usingSaved = $("connection-reuse").checked;
+  $("connection-reuse-row").hidden = !saved?.has_key;
+  $("connection-key").placeholder = saved?.has_key ? "填写新 Key 可更新" : config.key_optional ? "选填" : "请输入 API Key";
+  const usingSaved = saved?.has_key && $("connection-reuse").checked;
   const splitError = settings.split_errors?.[$("dataset").value]?.[$("split").value];
   for (const editor of Object.values(modelEditors)) updateModelEditor(editor);
   const missing = Object.keys(modelRoles).filter((role) => !settings.models[role].has_key);
@@ -291,13 +269,13 @@ function updateForm() {
     ? `请在「全局模型设置」配置${missing.map((role) => modelRoles[role]).join("和")}。` : "";
   const ready = $("evaluation-name").value.trim() && connection.api_url &&
     (config.key_optional || connection.api_key || usingSaved) &&
-    (backend !== "contextbase" || connection.bank_id || (sameUrl && config.has_bank_mapping));
+    (backend !== "contextbase" || connection.bank_id || saved?.has_bank_mapping);
   setError("config-error", splitError || modelError);
-  for (const id of ["backend", "connection-url", "connection-bank", "connection-reuse", "connection-save", "connection-reset", "connection-clear-default"]) {
-    $(id).disabled = savingConnection || submitting;
+  for (const id of ["backend", "connection-address", "connection-bank", "connection-key", "connection-reuse"]) {
+    $(id).disabled = submitting;
   }
-  $("connection-key").disabled = savingConnection || submitting || usingSaved;
-  $("start").disabled = submitting || savingConnection || savingModels.size > 0 || activeJob || !ready || Boolean(splitError || modelError);
+  $("connection-url").disabled = submitting || Boolean(saved);
+  $("start").disabled = submitting || savingModels.size > 0 || activeJob || !ready || Boolean(splitError || modelError);
   $("start").textContent = submitting ? "正在启动…" : activeJob ? "已有评测运行中" : "开始评测";
 }
 
@@ -579,6 +557,7 @@ $("run-form").addEventListener("submit", async (event) => {
   event.preventDefault();
   if ($("start").disabled) return;
   setError("form-error", "");
+  const backend = $("backend").value;
   const connection = { ...connectionInput(), use_saved_key: $("connection-reuse").checked };
   submitting = true;
   updateForm();
@@ -591,14 +570,15 @@ $("run-form").addEventListener("submit", async (event) => {
         connection,
         dataset: $("dataset").value,
         split: $("split").value,
-        backend: $("backend").value,
+        backend,
         query_limit: $("full").checked ? null : Number($("limit").value),
       }),
     });
     selected = job.id;
     historyOffset = 0;
     $("evaluation-name").value = "";
-    clearRunKey();
+    settings.backends[backend] = job.backend_config;
+    loadConnection();
     await refresh();
   } catch (error) {
     setError("form-error", error.message);
@@ -624,13 +604,18 @@ $("split").addEventListener("change", () => {
   updateQuestionCount();
 });
 $("backend").addEventListener("change", loadConnection);
-for (const id of ["evaluation-name", "connection-url", "connection-bank", "connection-key", "connection-reuse"]) {
-  $(id).addEventListener("input", () => {
-    if (id === "connection-reuse" && $("connection-reuse").checked) $("connection-key").value = "";
-    setError("connection-message", "");
-    updateForm();
-  });
+$("connection-address").addEventListener("change", selectConnection);
+for (const id of ["evaluation-name", "connection-url", "connection-bank"]) {
+  $(id).addEventListener("input", updateForm);
 }
+$("connection-key").addEventListener("input", () => {
+  if ($("connection-key").value.trim()) $("connection-reuse").checked = false;
+  updateForm();
+});
+$("connection-reuse").addEventListener("change", () => {
+  if ($("connection-reuse").checked) $("connection-key").value = "";
+  updateForm();
+});
 $("history-prev").addEventListener("click", () => changePage(Math.max(0, historyOffset - pageSize)));
 $("history-next").addEventListener("click", () => changePage(historyOffset + pageSize));
 $("compare-clear").addEventListener("click", () => {
@@ -638,9 +623,6 @@ $("compare-clear").addEventListener("click", () => {
   drawHistory();
   drawComparison();
 });
-$("connection-save").addEventListener("click", () => saveConnection());
-$("connection-reset").addEventListener("click", () => saveConnection("reset"));
-$("connection-clear-default").addEventListener("click", () => saveConnection("clear"));
 $("full").addEventListener("change", updateQuestionCount);
 
 async function init() {

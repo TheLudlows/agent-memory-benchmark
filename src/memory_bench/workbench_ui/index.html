@@ -34,8 +34,14 @@
           <p class="hint" id="backend-help"></p>
           <fieldset id="connection-panel" class="connection-panel" hidden>
             <legend>本轮连接</legend>
-            <label for="connection-url">API 地址</label>
-            <input id="connection-url" type="url" required maxlength="2048" placeholder="https://example.com">
+            <div id="connection-address-row" hidden>
+              <label for="connection-address">连接地址</label>
+              <select id="connection-address"></select>
+            </div>
+            <div id="connection-url-row">
+              <label for="connection-url">API 地址</label>
+              <input id="connection-url" type="url" required maxlength="2048" placeholder="https://example.com">
+            </div>
             <div id="connection-bank-row" hidden>
               <label for="connection-bank">Bank ID</label>
               <input id="connection-bank" type="text" maxlength="256" placeholder="已授权的测试 Bank">
@@ -43,14 +49,8 @@
             <label for="connection-key">API Key</label>
             <input id="connection-key" type="password" maxlength="4096" autocomplete="new-password">
             <label id="connection-reuse-row" class="check" hidden>
-              <input id="connection-reuse" type="checkbox"> 使用该地址已保存的 Key
+              <input id="connection-reuse" type="checkbox"> 使用该地址的 Key
             </label>
-            <div class="connection-actions">
-              <button id="connection-save" type="button" class="secondary">保存为默认连接</button>
-              <button id="connection-clear-default" type="button" class="secondary" hidden>清除默认 Key</button>
-              <button id="connection-reset" type="button" class="secondary" hidden>恢复初始配置</button>
-            </div>
-            <p id="connection-message" class="hint" aria-live="polite" hidden></p>
           </fieldset>
           <label id="question-count-label" for="limit">题目数</label>
           <div class="limit-row">

@@ -27,7 +27,7 @@ from .dataset import get_dataset
 from .dataset.beam import BEAMDataset, DEFAULT_JUDGE_MODEL, SPLITS as BEAM_SPLITS, local_data_path as beam_local_data_path
 from .dataset.locomo import SPLITS as LOCOMO_SPLITS
 from .dataset.longmemeval import SPLITS as LONGMEMEVAL_SPLITS
-from .workbench_connections import BackendId, Connections, ConnectionUpdate, RunConnection
+from .workbench_connections import BackendId, Connections, RunConnection
 from .workbench_models import JudgeProbeExit, ModelInput, ModelSettings, Role
 
 DATASETS = {
@@ -122,14 +122,18 @@ class RunManager:
     def start(self, selection: RunRequest) -> dict:
         if error := _dataset_error(selection.dataset, selection.split):
             raise HTTPException(422, error)
-        try:
-            connection = self.connections.for_run(selection.backend, selection.connection)
-            models, model_env = self.models.for_run(selection.dataset)
-        except ValueError as exc:
-            raise HTTPException(422, str(exc)) from exc
         with self.lock:
             if self.active:
                 raise HTTPException(409, "已有评测正在运行。")
+            try:
+                connection = self.connections.for_run(selection.backend, selection.connection)
+                models, model_env = self.models.for_run(selection.dataset)
+            except ValueError as exc:
+                raise HTTPException(422, str(exc)) from exc
+            try:
+                backend_config = self.connections.remember(selection.backend, connection)
+            except OSError as exc:
+                raise HTTPException(500, "无法保存本轮连接，请检查配置目录。") from exc
             run_id = uuid4().hex
             directory = self.root / run_id
             directory.mkdir(mode=0o700)
@@ -162,7 +166,7 @@ class RunManager:
                 key=len, reverse=True,
             )
             Thread(target=self._monitor, args=(job, process, secrets), daemon=True).start()
-            return job
+            return {**job, "backend_config": backend_config}
 
     def _monitor(self, job: dict, process: subprocess.Popen, secrets: list[str]) -> None:
         directory = self.root / job["id"]
@@ -269,9 +273,6 @@ def create_app(output_dir: Path) -> FastAPI:
     async def validation_error(request: Request, exc: RequestValidationError):
         if request.method == "POST" and request.url.path == "/api/runs":
             return JSONResponse({"detail": "评测配置无效，请检查名称、类型和本轮连接。"}, status_code=422)
-        if request.url.path.startswith("/api/connections/"):
-            # FastAPI normally returns the invalid input, which may contain a key.
-            return JSONResponse({"detail": "后端配置格式无效，请检查输入。"}, status_code=422)
         if request.url.path.startswith("/api/models/"):
             return JSONResponse({"detail": "模型配置格式无效，请检查提供方、模型 ID、地址和 Key。"}, status_code=422)
         return await request_validation_exception_handler(request, exc)
@@ -308,17 +309,6 @@ def create_app(output_dir: Path) -> FastAPI:
         except (OSError, ValueError, TypeError, KeyError, AttributeError) as exc:
             raise HTTPException(422, "无法读取本地评测数据的题数。") from exc
         return {"query_count": count}
-
-    @app.post("/api/connections/{backend}")
-    def save_connection(backend: BackendId, update: ConnectionUpdate):
-        try:
-            return manager.connections.save(backend, update)
-        except ValueError as exc:
-            raise HTTPException(422, str(exc)) from exc
-
-    @app.post("/api/connections/{backend}/reset")
-    def reset_connection(backend: BackendId):
-        return manager.connections.reset(backend)
 
     @app.post("/api/models/{role}")
     def save_model(role: Role, update: ModelInput):

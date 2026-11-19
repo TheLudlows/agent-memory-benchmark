@@ -13,3 +13,4 @@ data/tempo/
 .env*.local
 .env
 outputs-archive/
+amb-results/

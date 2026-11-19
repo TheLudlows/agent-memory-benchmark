@@ -1,9 +1,14 @@
+from __future__ import annotations
+
 import tempfile
 import uuid
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from qdrant_client import QdrantClient, models
-from sentence_transformers import SentenceTransformer
+
+if TYPE_CHECKING:
+    from sentence_transformers import SentenceTransformer
 
 from ..models import Document
 from ..utils import chunk_text
@@ -48,6 +53,7 @@ class HybridSearchMemoryProvider(MemoryProvider):
         return self._client
 
     def _init_models(self) -> None:
+        from sentence_transformers import SentenceTransformer
         from fastembed import SparseTextEmbedding
         self._dense_model = SentenceTransformer(_DENSE_MODEL, trust_remote_code=True, device="cpu")
         self._sparse_model = SparseTextEmbedding(model_name=_SPARSE_MODEL)

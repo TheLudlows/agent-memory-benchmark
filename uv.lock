@@ -231,6 +231,22 @@ dependencies = [
     { name = "uvicorn" },
 ]
 
+[package.dev-dependencies]
+http-runner = [
+    { name = "google-genai" },
+    { name = "groq" },
+    { name = "hindsight-client" },
+    { name = "httpx" },
+    { name = "openai" },
+    { name = "python-dotenv" },
+    { name = "qdrant-client" },
+    { name = "rank-bm25" },
+    { name = "rich" },
+    { name = "scipy" },
+    { name = "tiktoken" },
+    { name = "typer" },
+]
+
 [package.metadata]
 requires-dist = [
     { name = "cognee", specifier = ">=0.5.4" },
@@ -252,6 +268,22 @@ requires-dist = [
     { name = "tiktoken", specifier = ">=0.12.0" },
     { name = "typer", specifier = ">=0.12" },
     { name = "uvicorn", specifier = ">=0.41.0" },
+]
+
+[package.metadata.requires-dev]
+http-runner = [
+    { name = "google-genai" },
+    { name = "groq" },
+    { name = "hindsight-client" },
+    { name = "httpx" },
+    { name = "openai" },
+    { name = "python-dotenv" },
+    { name = "qdrant-client" },
+    { name = "rank-bm25" },
+    { name = "rich" },
+    { name = "scipy" },
+    { name = "tiktoken" },
+    { name = "typer" },
 ]
 
 [[package]]

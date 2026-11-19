@@ -1,0 +1,16 @@
+services:
+  amb:
+    build: .
+    image: amb-locomo:local
+    init: true
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      HINDSIGHT_HTTP_URL: ${HINDSIGHT_HTTP_URL:-http://host.docker.internal:8888}
+      HINDSIGHT_HTTP_KEY: ${HINDSIGHT_HTTP_KEY:-}
+      GEMINI_API_KEY: ${GEMINI_API_KEY:-}
+    extra_hosts:
+      - host.docker.internal:host-gateway
+    volumes:
+      - ./amb-results:/app/outputs

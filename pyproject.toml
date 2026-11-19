@@ -42,6 +42,12 @@ workbench = ["datasets", "fastapi", "ijson", "mem0ai", "uvicorn"]
 amb = "memory_bench.cli:app"
 omb = "memory_bench.cli:app"  # legacy alias (pre-rename); prefer `amb`
 
+[tool.uv]
+# hindsight-api declares `uvloop` unconditionally, but uvloop does not build on
+# Windows (it relies on libuv/epoll). Override it to install only off-Windows so
+# `uv run amb workbench` works on Windows (asyncio falls back to its default loop).
+override-dependencies = ["uvloop; sys_platform != 'win32'"]
+
 [tool.hatch.build.targets.wheel]
 packages = ["src/memory_bench"]
 

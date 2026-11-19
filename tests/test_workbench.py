@@ -101,6 +101,24 @@ def await_result(client, response):
         time.sleep(0.1)
 
 
+def test_standard_question_counts_without_loading_datasets(monkeypatch, tmp_path):
+    for variable in ("LOCOMO_DATA_PATH", "LONGMEMEVAL_DATA_PATH", "BEAM_DATA_PATH", "BEAM_DATA_SPLIT",
+                     "BEAM_100K_DATA_PATH", "BEAM_500K_DATA_PATH", "BEAM_1M_DATA_PATH", "BEAM_10M_DATA_PATH"):
+        monkeypatch.delenv(variable, raising=False)
+
+    with TestClient(create_app(tmp_path / "runs"), base_url="http://127.0.0.1") as client:
+        for dataset, split, count in (
+            ("locomo", "locomo10", 1540), ("longmemeval", "s", 500),
+            ("beam", "100k", 400), ("beam", "500k", 700), ("beam", "1m", 700), ("beam", "10m", 200),
+        ):
+            response = client.get(f"/api/datasets/{dataset}/{split}/query-count")
+            assert response.status_code == 200, response.text
+            assert response.json() == {"query_count": count}
+        assert client.get("/api/datasets/locomo/s/query-count").status_code == 404
+        monkeypatch.setenv("LOCOMO_DATA_PATH", str(tmp_path / "missing.json"))
+        assert client.get("/api/datasets/locomo/locomo10/query-count").status_code == 422
+
+
 def test_datasets_run_through_local_api_and_worker(monkeypatch, tmp_path, mock_services):
     endpoint, calls = mock_services
     options = {
@@ -127,7 +145,10 @@ def test_datasets_run_through_local_api_and_worker(monkeypatch, tmp_path, mock_s
                 "speaker_a": "A", "speaker_b": "B", "session_1_date_time": "1:00 pm on 1 May, 2023",
                 "session_1": [{"speaker": "A", "dia_id": "D1:1", "text": turn["content"]}],
             },
-            "qa": [{"question": "Where?", "answer": "Paris", "category": 1, "evidence": ["D1:1"]}],
+            "qa": [
+                {"question": "Where?", "answer": "Paris", "category": 1, "evidence": ["D1:1"]},
+                {"question": "Unknown?", "category": 5},
+            ],
         }),
         ("beam", "100k", "BEAM_100K_DATA_PATH", {
             "conversation_id": "beam-test", "chat": [[{**turn, "time_anchor": "May-1-2023"}]],
@@ -173,9 +194,12 @@ def test_datasets_run_through_local_api_and_worker(monkeypatch, tmp_path, mock_s
             dataset_path.write_text(json.dumps([data]))
             monkeypatch.setenv(variable, str(dataset_path))
             question_count = 4 if dataset == "beam" else 1
+            count_response = client.get(f"/api/datasets/{dataset}/{split}/query-count")
+            assert count_response.status_code == 200, count_response.text
+            assert count_response.json() == {"query_count": question_count}
             selection = {
                 "name": f"{dataset} baseline", "dataset": dataset, "split": split,
-                "backend": "contextbase", "query_limit": question_count, "connection": connection,
+                "backend": "contextbase", "query_limit": None, "connection": connection,
             }
             assert client.post("/api/runs", json={**selection, "split": "../invalid"}).status_code == 422
             assert client.post("/api/runs", json=selection, headers={"Origin": "https://elsewhere.test"}).status_code == 403

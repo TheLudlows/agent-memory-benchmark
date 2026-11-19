@@ -52,9 +52,10 @@
             </div>
             <p id="connection-message" class="hint" aria-live="polite" hidden></p>
           </fieldset>
-          <label for="limit">题目数</label>
+          <label id="question-count-label" for="limit">题目数</label>
           <div class="limit-row">
             <input id="limit" name="limit" type="number" min="1" step="1" value="5" required>
+            <output id="full-count" aria-labelledby="question-count-label" hidden></output>
             <label class="check"><input id="full" type="checkbox"> 跑全量</label>
           </div>
           <p class="hint">限制题数时，仍会写入所选题目对应的会话历史。</p>

@@ -20,6 +20,7 @@ let hasNextPage = false;
 let activeJob = false;
 let submitting = false;
 let savingConnection = false;
+let questionCountVersion = 0;
 
 const modelRoles = { answer: "回答模型", judge: "评分模型" };
 const providerLabels = { gemini: "Gemini", openai: "OpenAI 兼容", groq: "Groq" };
@@ -48,6 +49,27 @@ function options(id, values) {
 function updateSplits() {
   options("split", settings.datasets[$("dataset").value].map((item) => [item, item]));
   updateForm();
+  updateQuestionCount();
+}
+
+async function updateQuestionCount() {
+  const version = ++questionCountVersion;
+  const full = $("full").checked;
+  const count = $("full-count");
+  $("limit").disabled = full;
+  $("limit").hidden = full;
+  count.hidden = !full;
+  if (!full || !settings) return;
+
+  const dataset = $("dataset").value;
+  const split = $("split").value;
+  count.textContent = "正在读取题数…";
+  try {
+    const { query_count: total } = await api(`/datasets/${dataset}/${split}/query-count`);
+    if (version === questionCountVersion) count.textContent = `${total.toLocaleString("zh-CN")} 题`;
+  } catch {
+    if (version === questionCountVersion) count.textContent = "无法读取题数";
+  }
 }
 
 function loadConnection() {
@@ -271,7 +293,6 @@ function updateForm() {
     $(id).disabled = savingConnection || submitting;
   }
   $("connection-key").disabled = savingConnection || submitting || usingSaved;
-  $("limit").disabled = $("full").checked;
   $("start").disabled = submitting || savingConnection || savingModels.size > 0 || activeJob || !ready || Boolean(splitError || modelError);
   $("start").textContent = submitting ? "正在启动…" : activeJob ? "已有评测运行中" : "开始评测";
 }
@@ -605,7 +626,10 @@ $("cancel").addEventListener("click", async () => {
 });
 
 $("dataset").addEventListener("change", updateSplits);
-$("split").addEventListener("change", updateForm);
+$("split").addEventListener("change", () => {
+  updateForm();
+  updateQuestionCount();
+});
 $("backend").addEventListener("change", loadConnection);
 for (const id of ["evaluation-name", "connection-url", "connection-bank", "connection-key", "connection-reuse"]) {
   $(id).addEventListener("input", () => {
@@ -624,7 +648,7 @@ $("compare-clear").addEventListener("click", () => {
 $("connection-save").addEventListener("click", () => saveConnection());
 $("connection-reset").addEventListener("click", () => saveConnection("reset"));
 $("connection-clear-default").addEventListener("click", () => saveConnection("clear"));
-$("full").addEventListener("change", updateForm);
+$("full").addEventListener("change", updateQuestionCount);
 
 async function init() {
   try {
@@ -638,6 +662,7 @@ async function init() {
     }
     $("model-settings").hidden = false;
     loadConnection();
+    updateQuestionCount();
     await poll();
   } catch (error) {
     setError("form-error", error.message);

@@ -7,7 +7,11 @@ from pathlib import Path
 
 
 def data_path(*parts: str) -> Path:
-    return Path(__file__).resolve().parents[2].joinpath("data", *parts)
+    checkout = Path(__file__).resolve().parents[2] / "data"
+    if not (checkout / "offline").is_dir():
+        # A regular pip install can still run from the repository directory.
+        checkout = Path.cwd() / "data"
+    return checkout.joinpath(*parts)
 
 
 def read_json(path: Path):

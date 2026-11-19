@@ -53,3 +53,12 @@ def test_missing_local_data_reports_the_path(offline, monkeypatch, tmp_path):
     with pytest.raises(FileNotFoundError) as exc:
         get_dataset("locomo").load_queries("locomo10")
     assert exc.value.filename == str(path)
+
+
+def test_installed_cli_can_load_data_from_the_repository_directory(offline, monkeypatch, tmp_path):
+    from memory_bench import data_files
+
+    repository = data_files.data_path().parent
+    monkeypatch.chdir(repository)
+    monkeypatch.setattr(data_files, "__file__", str(tmp_path / "site-packages" / "memory_bench" / "data_files.py"))
+    assert len(get_dataset("locomo").load_queries("locomo10")) == 1540

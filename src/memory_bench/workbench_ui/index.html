@@ -78,13 +78,21 @@
           <div id="empty" class="empty">开启一次评测，或从下方历史记录选择已有运行。</div>
           <div id="run-detail" hidden>
             <div class="run-title">
-              <div>
-                <h3 id="run-name"></h3>
-                <p id="run-meta" class="hint"></p>
-                <p id="run-target" class="hint run-target" hidden></p>
-              </div>
+              <h3 id="run-name"></h3>
               <button type="button" id="cancel" class="secondary" hidden>停止评测</button>
             </div>
+            <div class="run-meta">
+              <span id="run-type"></span>
+              <span id="run-retrieval-mode" hidden>纯检索评测</span>
+              <time id="run-started-at"></time>
+            </div>
+            <p id="run-target" class="hint run-target" hidden></p>
+            <dl id="run-models" class="run-models" hidden>
+              <dt id="run-answer-label">回答模型</dt>
+              <dd id="run-answer-model"></dd>
+              <dt id="run-judge-label">评分模型</dt>
+              <dd id="run-judge-model"></dd>
+            </dl>
             <div class="progress-caption"><strong id="stage"></strong><span id="elapsed"></span></div>
             <progress id="loading-progress" aria-label="加载数据集" hidden></progress>
             <div id="ingestion-progress-row" class="run-progress-row" hidden>

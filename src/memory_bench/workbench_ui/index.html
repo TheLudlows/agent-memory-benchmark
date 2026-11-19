@@ -58,14 +58,18 @@
             <label class="check"><input id="full" type="checkbox"> 跑全量</label>
           </div>
           <p class="hint">限制题数时，仍会写入所选题目对应的会话历史。</p>
-          <div class="models">
-            <div><span>回答模型</span><strong id="answer-model">—</strong></div>
-            <div><span>评分模型</span><strong id="judge-model">—</strong></div>
-          </div>
+          <fieldset class="connection-panel model-panel">
+            <legend>本轮模型</legend>
+            <div id="run-models"></div>
+          </fieldset>
           <p id="config-error" class="error" hidden></p>
           <button id="start" class="primary" type="submit" disabled>开始评测</button>
           <p role="alert" id="form-error" class="error" hidden></p>
         </form>
+        <details id="model-settings" class="model-settings" hidden>
+          <summary>全局模型设置</summary>
+          <div id="global-models"></div>
+        </details>
       </section>
 
       <div class="details">
@@ -141,5 +145,31 @@
       </div>
     </div>
   </main>
+  <template id="model-editor">
+    <fieldset class="connection-panel model-editor">
+      <legend data-part="title"></legend>
+      <label class="check" data-part="toggle-row">
+        <input type="checkbox" data-part="toggle"> 本轮单独指定
+      </label>
+      <p class="hint model-name" data-part="summary"></p>
+      <div data-part="fields">
+        <label data-for="provider">提供方</label>
+        <select data-part="provider"></select>
+        <label data-for="model">模型 ID</label>
+        <input data-part="model" type="text" maxlength="256" placeholder="填写提供方的模型 ID">
+        <div data-part="url-row">
+          <label data-for="url">模型 API 地址</label>
+          <input data-part="url" type="url" maxlength="2048" placeholder="https://example.com/v1">
+        </div>
+        <label data-for="key">模型 API Key</label>
+        <input data-part="key" type="password" maxlength="4096" autocomplete="new-password">
+      </div>
+      <div class="connection-actions" data-part="actions">
+        <button type="button" class="secondary" data-part="save">保存默认模型</button>
+        <button type="button" class="secondary" data-part="reset">恢复 .env 默认</button>
+      </div>
+      <p class="hint" data-part="message" aria-live="polite" hidden></p>
+    </fieldset>
+  </template>
 </body>
 </html>

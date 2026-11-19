@@ -132,7 +132,8 @@ Chat Completions 的 JSON Schema 输出，`OPENAI_BASE_URL` 应包含服务的 A
 `BEAM_DATA_PATH`，需要同时用 `BEAM_DATA_SPLIT` 指明文件所属的标准 split。没有指定本地文件的 split
 会使用对应的官方数据。比较不同后端时，请使用相同的 split、题数和回答及评分模型。
 
-BEAM 的空召回题以 0 分计入平均分。评分服务失败时，运行标为「评分未完成」并显示失败题数。
+BEAM 有答案的题目如果没有召回内容，以 0 分计入平均分。数据集标注的拒答题（`abstention`）即使
+没有召回内容，也会按评分标准检查模型是否说明信息不足。评分服务失败时，运行标为「评分未完成」并显示失败题数。
 导出的 JSON 保留逐题结果，失败题标记为 `scoring_failed`，总分 `accuracy` 为 `null`。
 
 评测台供本机单用户使用，一次运行一个评测。每次运行都有独立的 Hindsight Bank 名称或 Mem0 用户 ID；

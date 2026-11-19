@@ -2,6 +2,7 @@ import asyncio
 import json
 import threading
 import time
+from dataclasses import asdict
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -10,9 +11,12 @@ from fastapi.testclient import TestClient
 
 from memory_bench.dataset.beam import BEAMDataset
 from memory_bench.judge import ScoringError
+from memory_bench.memory.base import MemoryProvider
 from memory_bench.memory.hindsight import HindsightHTTPMemoryProvider
 from memory_bench.memory.mem0_cloud import Mem0CloudMemoryProvider
-from memory_bench.models import Document
+from memory_bench.models import Document, QueryResult
+from memory_bench.modes.rag import RAGMode
+from memory_bench.runner import EvalRunner
 from memory_bench.workbench import create_app
 
 
@@ -41,12 +45,20 @@ def mock_services():
                     self.send_json({"error": {"message": "test judge unavailable"}}, status=401)
                     return
                 schema = body["response_format"]["json_schema"]["schema"]["properties"]
+                prompt = body["messages"][0]["content"]
                 values = {"answer": "Paris", "reasoning": "From memory", "score": 1.0, "correct": True, "reason": "Match"}
+                if "What did they say about pets?" in prompt:
+                    values["answer"] = "I don't have enough information to answer this question."
+                    values["score"] = float(values["answer"] in prompt)
+                elif "What is their salary?" in prompt:
+                    values["answer"] = "$120,000"
+                    values["score"] = 0.0
                 self.send_json({"choices": [{"message": {"content": json.dumps({key: values[key] for key in schema})}}]})
             elif self.path.endswith("/memories"):
                 self.send_json({"success": True, "async": True, "items_count": len(body["items"]), "operation_id": "test-op"})
             elif self.path.endswith("/memories/recall"):
-                matches = [] if body["query"] == "No memory?" else [{"id": "fact", "text": "The location is Paris"}]
+                empty_queries = {"No memory?", "What did they say about pets?", "What is their salary?"}
+                matches = [] if body["query"] in empty_queries else [{"id": "fact", "text": "The location is Paris"}]
                 self.send_json({"results": matches})
             else:
                 self.send_json({}, status=404)
@@ -96,10 +108,17 @@ def test_datasets_run_through_local_api_and_worker(monkeypatch, tmp_path, mock_s
         }),
         ("beam", "100k", "BEAM_100K_DATA_PATH", {
             "conversation_id": "beam-test", "chat": [[{**turn, "time_anchor": "May-1-2023"}]],
-            "probing_questions": {"information_extraction": [
-                {"question": "Where?", "answer": "Paris"},
-                {"question": "No memory?", "answer": "Paris"},
-            ]},
+            "probing_questions": {
+                "abstention": [
+                    {"question": "What did they say about pets?",
+                     "rubric": ["States that the conversation does not say anything about pets."]},
+                    {"question": "What is their salary?"},
+                ],
+                "information_extraction": [
+                    {"question": "Where?", "answer": "Paris"},
+                    {"question": "No memory?", "answer": "Paris"},
+                ],
+            },
         }),
         ("longmemeval", "s", "LONGMEMEVAL_DATA_PATH", {
             "question_id": "long-test", "question_type": "single-session-user", "question": "Where?", "answer": "Paris",
@@ -131,7 +150,7 @@ def test_datasets_run_through_local_api_and_worker(monkeypatch, tmp_path, mock_s
             dataset_path = tmp_path / f"{dataset}.json"
             dataset_path.write_text(json.dumps([data]))
             monkeypatch.setenv(variable, str(dataset_path))
-            question_count = 2 if dataset == "beam" else 1
+            question_count = 4 if dataset == "beam" else 1
             selection = {"dataset": dataset, "split": split, "backend": "contextbase", "query_limit": question_count}
             assert client.post("/api/runs", json={**selection, "split": "../invalid"}).status_code == 422
             assert client.post("/api/runs", json=selection, headers={"Origin": "https://elsewhere.test"}).status_code == 403
@@ -146,11 +165,16 @@ def test_datasets_run_through_local_api_and_worker(monkeypatch, tmp_path, mock_s
             assert detail["summary"]["ingested_docs"] == (2 if dataset == "longmemeval" else 1)
             assert detail["result_available"]
             result = client.get(detail_url + "/result")
-            assert result.json()["results"][0]["answer"] == "Paris"
             assert "attachment" in result.headers["Content-Disposition"]
+            rows = result.json()["results"]
             if dataset == "beam":
                 assert result.json()["accuracy"] == 0.5
-                assert [row["score"] for row in result.json()["results"]] == [1.0, 0.0]
+                assert [row["score"] for row in rows] == [1.0, 0.0, 1.0, 0.0]
+                assert rows[0]["context"] == rows[1]["context"] == ""
+                assert rows[0]["answer"] == "I don't have enough information to answer this question."
+                assert rows[1]["answer"] == "$120,000"
+            else:
+                assert rows[0]["answer"] == "Paris"
 
         ingests = [body for path, body in calls if path.endswith("/memories")]
         recalls = [body for path, body in calls if path.endswith("/memories/recall")]
@@ -161,15 +185,16 @@ def test_datasets_run_through_local_api_and_worker(monkeypatch, tmp_path, mock_s
 
         monkeypatch.setenv("OMB_JUDGE_MODEL", "judge-fail")
         detail_url, detail = await_result(client, client.post("/api/runs", json={
-            "dataset": "beam", "split": "100k", "backend": "contextbase", "query_limit": 2,
+            "dataset": "beam", "split": "100k", "backend": "contextbase", "query_limit": 4,
         }))
         assert detail["status"] == "scoring_incomplete", detail["log"]
-        assert detail["summary"]["scoring_failed_queries"] == 1
+        assert detail["summary"]["scoring_failed_queries"] == 3
         assert detail["summary"]["score"] is None
         result = client.get(detail_url + "/result").json()
-        assert result["accuracy"] is None and result["scoring_failed_queries"] == 1
-        assert [(row["score"], row["scoring_failed"]) for row in result["results"]] == [(None, True), (0.0, False)]
-        assert result["results"][0]["answer"] == "Paris"
+        assert result["accuracy"] is None and result["scoring_failed_queries"] == 3
+        rows = result["results"]
+        assert [(r["score"], r["scoring_failed"]) for r in rows] == [(None, True)] * 3 + [(0.0, False)]
+        assert rows[2]["answer"] == "Paris"
 
         response = client.post("/api/runs", json={
             "dataset": "locomo", "split": "locomo10", "backend": "contextbase", "query_limit": 1,
@@ -300,3 +325,50 @@ def test_result_download_during_checkpoint_replacement(tmp_path, replace_on):
             assert int(headers[b"content-length"]) == len(body)
 
     asyncio.run(download())
+
+
+def test_beam_can_rejudge_a_legacy_empty_context_abstention(monkeypatch, tmp_path):
+    dataset = BEAMDataset()
+    monkeypatch.setattr(dataset, "_load_raw", lambda split: [{
+        "conversation_id": "conv",
+        "chat": [[{"role": "user", "content": "I live in Paris."}]],
+        "probing_questions": {"abstention": [{"question": "What is my salary?"}]},
+    }])
+    refusal = "I don't have enough information to answer this question."
+
+    class Judge:
+        model_id = "judge-stub"
+
+        def generate(self, prompt, schema):
+            assert f"LLM RESPONSE:\n{refusal}" in prompt
+            assert "does not provide a specific answer" in prompt
+            return {"score": 1.0, "reason": "States that the information is unavailable"}
+
+    class Memory(MemoryProvider):
+        name = "test-memory"
+
+        def ingest(self, documents):
+            pytest.fail("cached rejudging should not ingest documents")
+
+        def retrieve(self, query, k=10, user_id=None, query_timestamp=None):
+            pytest.fail("cached rejudging should not retrieve")
+
+    judge = Judge()
+    monkeypatch.setattr(dataset, "default_judge_llm", lambda: judge)
+    legacy = QueryResult(
+        query_id="conv_abstention_0", query="What is my salary?", answer=refusal, reasoning="",
+        context="", context_tokens=0, retrieve_time_ms=0.0, gold_answers=[], correct=False,
+        judge_reason="empty context — no memories retrieved", score=0.0,
+        meta={"question_category": "abstention"},
+    )
+    result = tmp_path / "beam" / Memory.name / "rag" / "100k.json"
+    result.parent.mkdir(parents=True)
+    result.write_text(json.dumps({"accuracy": 0.0, "results": [asdict(legacy)]}))
+
+    summary = EvalRunner(tmp_path).run(
+        dataset=dataset, split="100k", memory=Memory(), mode=RAGMode(judge),
+        skip_answer=True, skip_ingestion=True, only_failed=True,
+    )
+    assert summary.accuracy == 1.0
+    assert summary.scoring_failed_queries == 0
+    assert summary.results[0].correct

@@ -13,6 +13,7 @@ from rich.console import Console
 from rich.progress import Progress, SpinnerColumn, BarColumn, TaskProgressColumn, TimeElapsedColumn
 
 _CONCURRENCY = 4
+_EMPTY_CONTEXT_REASON = "empty context — no memories retrieved"
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger(__name__)
@@ -100,6 +101,11 @@ class EvalRunner:
             if not same_ingest:
                 previous = {}
         previous_rows = {row["query_id"]: row for row in previous.get("results", [])}
+        for row in previous_rows.values():
+            if row.get("judge_reason") == _EMPTY_CONTEXT_REASON and dataset.should_judge_empty_context(row.get("meta", {})):
+                # These answers predate the abstention rule and have no valid score.
+                row.update(correct=False, score=None, scoring_failed=True,
+                           judge_reason="Legacy result with an unjudged abstention answer")
 
         memory.initialize()
         store_dir = self.output_dir / dataset.name / effective_name / "_store" / split / (category or "all")
@@ -260,8 +266,8 @@ class EvalRunner:
                 docs = (answer_result.raw_response or {}).get("documents") or []
                 correct, judge_reason, *ranked_score = dataset.score_retrieval(q, docs)
                 score = float(ranked_score[0]) if ranked_score else None
-            elif not answer_result.context:
-                correct, judge_reason = False, "empty context — no memories retrieved"
+            elif not answer_result.context and not dataset.should_judge_empty_context(q.meta):
+                correct, judge_reason = False, _EMPTY_CONTEXT_REASON
                 if hasattr(dataset, "score_result"):
                     score = 0.0
             elif task_type == "mcq":

@@ -451,6 +451,9 @@ class BEAMDataset(Dataset):
         )
 
 
+    def should_judge_empty_context(self, meta: dict) -> bool:
+        return meta.get("question_category") == "abstention"
+
     def default_judge_llm(self):
         # Judged with gemini-3.5-flash by default (more reliable rubric scoring than
         # 2.5-flash-lite). The judge moves the score, so a comparison across runs has to
@@ -799,8 +802,12 @@ Return JSON: {{"score": <0.0 or 0.5 or 1.0>, "reason": "<one concise sentence>"}
         # event_ordering nuggets are bare topics → frame them as "should mention" for the judge.
         if cat == "event_ordering":
             rubric = [r if "should" in str(r).lower() else f"LLM response should mention: {r}" for r in rubric]
-        if not rubric and result.gold_answers:
-            rubric = [f"LLM response should contain: {result.gold_answers[0]}"]
+        if not rubric:
+            if cat == "abstention":
+                rubric = ["The response states that the requested information is unavailable "
+                          "in the conversation and does not provide a specific answer."]
+            elif result.gold_answers:
+                rubric = [f"LLM response should contain: {result.gold_answers[0]}"]
         if not rubric:
             logger.warning("[%s] No rubric found, falling back to 0", result.query_id)
             return 0.0

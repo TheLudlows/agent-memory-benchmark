@@ -31,7 +31,7 @@ from pathlib import Path
 from rich.console import Console
 from rich.table import Table
 
-from ._cache import dataset_cache_dir
+from ._cache import dataset_cache_dir, staging_file
 from .base import Dataset
 from ..models import Document, Query
 
@@ -96,7 +96,8 @@ class LoComoDataset(Dataset):
         cache = dataset_cache_dir("locomo")
         path = cache / "locomo10.json"
         if not path.exists():
-            urllib.request.urlretrieve(_DATA_URL, path)
+            with staging_file(path) as temporary:
+                urllib.request.urlretrieve(_DATA_URL, temporary)
         return path
 
     def _load_raw(self) -> list[dict]:

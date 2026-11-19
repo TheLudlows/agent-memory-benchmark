@@ -54,8 +54,8 @@ def run(
     description: str = typer.Option(None, "--description", "-d", help="Optional description for this run (stored in the result JSON)"),
 ) -> None:
     """Run an evaluation on a single split (optionally filtered to a category)."""
-    if memory == "contextbase" and (dataset not in {"locomo", "locomo-fixed"} or mode != "rag"):
-        raise typer.BadParameter("ContextBase supports locomo and locomo-fixed in rag mode.", param_hint="--memory")
+    if memory == "contextbase" and (dataset not in {"locomo", "locomo-fixed", "beam", "longmemeval"} or mode != "rag"):
+        raise typer.BadParameter("ContextBase supports LoCoMo, BEAM and LongMemEval in rag mode.", param_hint="--memory")
     no_llm = mode == "retrieval"  # search only: no answer model, no judge, no LLM key needed
     if not no_llm:
         _resolve_gemini_key()
@@ -93,6 +93,11 @@ def run(
     table.add_column("Value", justify="right")
     table.add_row("Total queries", str(summary.total_queries))
     table.add_row("Correct", str(summary.correct))
+    if summary.accuracy is None:
+        table.add_row("Scoring failed", str(summary.scoring_failed_queries))
+        console.print(table)
+        typer.echo("Scoring is incomplete. Partial results were saved without an aggregate score.", err=True)
+        raise typer.Exit(1)
     if summary.score_type == "accuracy":
         table.add_row("Accuracy", f"{summary.accuracy:.1%}")
     else:
@@ -806,3 +811,19 @@ def view(
     finally:
         if vite_proc is not None:
             vite_proc.terminate()
+
+
+
+@app.command("workbench")
+def workbench(
+    port: int = typer.Option(8090, min=1, max=65535),
+    output_dir: Path = typer.Option(Path("outputs/workbench"), "--output-dir", "-o"),
+    docker: bool = typer.Option(False, "--docker", hidden=True),
+) -> None:
+    """Start the local benchmark dashboard."""
+    import uvicorn
+
+    from .workbench import create_app
+
+    console.print(f"AMB Workbench → http://127.0.0.1:{port}")
+    uvicorn.run(create_app(output_dir), host="0.0.0.0" if docker else "127.0.0.1", port=port)

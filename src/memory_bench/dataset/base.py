@@ -158,6 +158,10 @@ class Dataset(ABC):
         """Build the judge prompt for evaluating an answer. Override per-dataset for custom judging."""
         return None  # None means use the default judge prompt in GeminiJudge
 
+    def should_judge_empty_context(self, meta: dict) -> bool:
+        """Whether to judge the generated answer when retrieval returns no context."""
+        return False
+
     def default_judge_llm(self):
         """Return the preferred LLM for judging this dataset, or None to use the global default."""
         return None

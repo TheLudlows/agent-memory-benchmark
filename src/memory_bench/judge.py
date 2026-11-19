@@ -33,6 +33,10 @@ _SCHEMA = Schema(
 )
 
 
+class ScoringError(RuntimeError):
+    """Scoring failed without a valid score."""
+
+
 class GeminiJudge:
     def __init__(self, llm: LLM | None = None):
         from .llm import get_judge_llm

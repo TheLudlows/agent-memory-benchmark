@@ -53,12 +53,13 @@ class QueryResult:
     gold_answers: list[str]
     correct: bool
     judge_reason: str
-    score: float | None = None  # continuous score 0-1 (used by BEAM paper scoring); None means binary only
+    score: float | None = None  # continuous score, if available
     meta: dict = field(default_factory=dict)  # propagated from Query.meta
     raw_response: dict | None = None  # raw provider response, free-form
     trajectory: list | None = None     # coding: flattened agent steps ({k: say|tool|patch, ...}) for the UI agent view
     git_history: list | None = None    # coding: the repo's recent commits ({sha, subject, body, diff})
     category_axes: dict[str, list[str]] = field(default_factory=dict)  # axis → values, e.g. {"conversation": ["conv-26"], "question_type": ["temporal"]}
+    scoring_failed: bool = False
 
 
 @dataclass
@@ -72,7 +73,7 @@ class EvalSummary:
     oracle: bool
     total_queries: int
     correct: int
-    accuracy: float
+    accuracy: float | None  # None when scoring did not complete
     ingestion_time_ms: float  # wall time for memory.ingest()
     ingested_docs: int
     score_type: str = "accuracy"      # what `accuracy` holds: "accuracy", or a ranked metric such as "ndcg@10"
@@ -81,3 +82,4 @@ class EvalSummary:
     judge_llm: str | None = None      # e.g. "gemini:gemini-2.5-flash-lite"
     results: list[QueryResult] = field(default_factory=list)
     ingestion_run_id: str | None = None
+    scoring_failed_queries: int = 0

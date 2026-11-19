@@ -29,7 +29,7 @@ class ContextBaseMemoryProvider(MemoryProvider):
         if not isinstance(self._bank_map, dict) or not all(
             isinstance(bank, str) and bank.strip() for bank in self._bank_map.values()
         ):
-            raise ValueError("CONTEXTBASE_BENCH_BANKS must map conversation IDs to Bank IDs.")
+            raise ValueError("CONTEXTBASE_BENCH_BANKS must map isolation unit IDs to Bank IDs.")
         if bool(self._bank_id) == bool(self._bank_map):
             raise ValueError("Set either CONTEXTBASE_BANK_ID or CONTEXTBASE_BENCH_BANKS.")
 
@@ -51,12 +51,12 @@ class ContextBaseMemoryProvider(MemoryProvider):
 
     def prepare(self, store_dir: Path, unit_ids: set[str] | None = None, reset: bool = True) -> None:
         if not unit_ids:
-            raise ValueError("No LoCoMo conversations matched the benchmark selection.")
+            raise ValueError("No isolation units matched the benchmark selection.")
         missing = unit_ids - self._bank_map.keys() if self._bank_map else set()
         if missing:
             raise ValueError(f"Missing ContextBase Bank mappings for: {', '.join(sorted(missing))}")
         if self._bank_map and len({self._bank_map[unit] for unit in unit_ids}) != len(unit_ids):
-            raise ValueError("Assign a distinct ContextBase Bank to each mapped conversation.")
+            raise ValueError("Assign a distinct ContextBase Bank to each mapped isolation unit.")
         if reset:
             self.ingestion_run_id = uuid4().hex
         elif not self._configured_run_id:
@@ -71,7 +71,7 @@ class ContextBaseMemoryProvider(MemoryProvider):
 
     def _scope(self, unit_id: str | None) -> tuple[str, list[str]]:
         if not unit_id:
-            raise ValueError("ContextBase requires a conversation ID for Retain and Recall.")
+            raise ValueError("ContextBase requires an isolation unit ID for Retain and Recall.")
         bank_id = self._bank_map[unit_id] if self._bank_map else self._bank_id
         return f"v1/default/banks/{quote(bank_id, safe='')}", [f"amb-run:{self.ingestion_run_id}", f"amb-unit:{unit_id}"]
 
@@ -85,7 +85,7 @@ class ContextBaseMemoryProvider(MemoryProvider):
         for doc in documents:
             unit_id = doc.user_id
             if not unit_id:
-                raise ValueError("ContextBase requires a conversation ID for each retained document.")
+                raise ValueError("ContextBase requires an isolation unit ID for each retained document.")
             _, tags = self._scope(unit_id)
             item = {
                 "content": doc.content.replace("\x00", ""),

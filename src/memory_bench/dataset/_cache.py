@@ -1,4 +1,6 @@
+from contextlib import contextmanager
 from pathlib import Path
+from uuid import uuid4
 
 
 def dataset_cache_dir(name: str) -> Path:
@@ -14,3 +16,14 @@ def dataset_cache_dir(name: str) -> Path:
     path = here.parent / ".datasets" / name
     path.mkdir(parents=True, exist_ok=True)
     return path
+
+
+@contextmanager
+def staging_file(path: Path):
+    """Publish the dataset cache only after a complete download."""
+    temporary = path.with_name(f".{path.name}.{uuid4().hex}.part")
+    try:
+        yield temporary
+        temporary.replace(path)
+    finally:
+        temporary.unlink(missing_ok=True)

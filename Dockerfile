@@ -1,5 +1,5 @@
 # syntax=docker/dockerfile:1.7
-FROM ghcr.io/astral-sh/uv:0.9.18-python3.12-bookworm-slim
+FROM ghcr.io/astral-sh/uv:0.9.18-python3.12-bookworm-slim AS cli
 WORKDIR /app
 ENV PATH="/app/.venv/bin:$PATH" \
     UV_LINK_MODE=copy \
@@ -21,3 +21,11 @@ ADD --chmod=0444 --checksum=sha256:79fa87e90f04081343b8c8debecb80a9a6842b76a7aa5
 ADD --chmod=0444 --checksum=sha256:41003d4a74749c0220e33dd415042164b5a1093ed401f36277234f772d22d3d0 https://raw.githubusercontent.com/snap-research/locomo/3eb6f2c585f5e1699204e3c3bdf7adc5c28cb376/LICENSE.txt /opt/locomo/LICENSE.txt
 ENTRYPOINT ["amb"]
 CMD ["run", "--dataset", "locomo", "--split", "locomo10", "--memory", "hindsight-http", "--mode", "rag"]
+
+
+FROM cli AS workbench
+RUN --mount=type=cache,target=/root/.cache/uv uv sync --frozen --only-group http-runner --only-group workbench \
+    && uv pip install --no-deps --editable .
+CMD ["workbench", "--docker"]
+
+FROM cli AS default

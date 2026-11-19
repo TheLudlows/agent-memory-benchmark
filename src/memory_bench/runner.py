@@ -2,6 +2,7 @@ import asyncio
 import json
 import logging
 import time
+from collections.abc import Callable
 from dataclasses import asdict, fields
 from pathlib import Path
 from uuid import uuid4
@@ -12,12 +13,13 @@ from rich.console import Console
 from rich.progress import Progress, SpinnerColumn, BarColumn, TaskProgressColumn, TimeElapsedColumn
 
 _CONCURRENCY = 4
+_EMPTY_CONTEXT_REASON = "empty context — no memories retrieved"
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger(__name__)
 
 from .dataset.base import Dataset
-from .judge import GeminiJudge
+from .judge import GeminiJudge, ScoringError
 from .memory.base import MemoryProvider
 from .modes.base import ResponseMode
 from .models import EvalSummary, QueryResult
@@ -38,17 +40,18 @@ def _score_mcq(answer: str, gold_answers: list[str]) -> tuple[bool, str]:
 
 
 class EvalRunner:
-    def __init__(self, output_dir: Path = Path("outputs")):
+    def __init__(
+        self, output_dir: Path = Path("outputs"),
+        on_progress: Callable[[str, int, int], None] | None = None,
+    ):
         self.output_dir = output_dir
+        self.on_progress = on_progress
         self._judge: GeminiJudge | None = None  # built on first use: retrieval runs need no LLM key
         self._dataset_metrics: dict = {}
 
     def _get_judge(self, dataset: Dataset) -> "GeminiJudge":
-        dataset_llm = dataset.default_judge_llm() if hasattr(dataset, "default_judge_llm") else None
-        if dataset_llm is not None:
-            return GeminiJudge(llm=dataset_llm)
         if self._judge is None:
-            self._judge = GeminiJudge()
+            self._judge = GeminiJudge(llm=dataset.default_judge_llm())
         return self._judge
 
     def run(
@@ -74,6 +77,7 @@ class EvalRunner:
     ) -> EvalSummary:
         effective_name = run_name or memory.name
         self._dataset_metrics = {}
+        self._judge = None
         cat_label = f"  [bold]Category:[/bold] {category}" if category else ""
         name_label = f"  [bold]Run:[/bold] {effective_name}" if run_name else ""
         console.print(f"\n[bold]Dataset:[/bold] {dataset.name}  [bold]Split:[/bold] {split}{cat_label}  [bold]Memory:[/bold] {memory.name}{name_label}  [bold]Mode:[/bold] {mode.name}\n")
@@ -97,6 +101,11 @@ class EvalRunner:
             if not same_ingest:
                 previous = {}
         previous_rows = {row["query_id"]: row for row in previous.get("results", [])}
+        for row in previous_rows.values():
+            if row.get("judge_reason") == _EMPTY_CONTEXT_REASON and dataset.should_judge_empty_context(row.get("meta", {})):
+                # These answers predate the abstention rule and have no valid score.
+                row.update(correct=False, score=None, scoring_failed=True,
+                           judge_reason="Legacy result with an unjudged abstention answer")
 
         memory.initialize()
         store_dir = self.output_dir / dataset.name / effective_name / "_store" / split / (category or "all")
@@ -227,6 +236,7 @@ class EvalRunner:
             q.meta.update((answer_result.raw_response or {}).get("meta") or {})
 
             score: float | None = None
+            scoring_failed = False
             coding_trajectory = coding_git_history = None
             if task_type == "coding":
                 # The CodingMode already built the repo, ran the agent (with interventions), and graded
@@ -256,8 +266,10 @@ class EvalRunner:
                 docs = (answer_result.raw_response or {}).get("documents") or []
                 correct, judge_reason, *ranked_score = dataset.score_retrieval(q, docs)
                 score = float(ranked_score[0]) if ranked_score else None
-            elif not answer_result.context:
-                correct, judge_reason = False, "empty context — no memories retrieved"
+            elif not answer_result.context and not dataset.should_judge_empty_context(q.meta):
+                correct, judge_reason = False, _EMPTY_CONTEXT_REASON
+                if hasattr(dataset, "score_result"):
+                    score = 0.0
             elif task_type == "mcq":
                 correct, judge_reason = _score_mcq(answer_result.answer, q.gold_answers)
             elif hasattr(dataset, "score_result"):
@@ -271,10 +283,15 @@ class EvalRunner:
                     meta=q.meta,
                 )
                 judge_llm = self._get_judge(dataset)._llm
-                score = await asyncio.to_thread(dataset.score_result, tmp_result, judge_llm)
-                score = float(score)
-                correct = score >= 0.5
-                judge_reason = f"score={score:.3f}"
+                try:
+                    score = float(await asyncio.to_thread(dataset.score_result, tmp_result, judge_llm))
+                except ScoringError as exc:
+                    scoring_failed = True
+                    correct, judge_reason = False, str(exc)
+                    logger.warning("[query:%s] %s: %s", q.id, exc, exc.__cause__ or exc)
+                else:
+                    correct = score >= 0.5
+                    judge_reason = f"score={score:.3f}"
             else:
                 # Use per-query judge if dataset supports it (e.g. LongMemEval has per-category prompts)
                 if hasattr(dataset, "get_judge_prompt_fn"):
@@ -300,6 +317,7 @@ class EvalRunner:
                 correct=correct,
                 judge_reason=judge_reason,
                 score=score,
+                scoring_failed=scoring_failed,
                 meta=q.meta,
                 raw_response=None,  # skip storing to conserve disk space
                 trajectory=coding_trajectory,
@@ -309,6 +327,15 @@ class EvalRunner:
 
         ingestion_ms = 0.0
         ingested_docs_count = 0
+        completed = 0
+
+        def report(stage: str, advanced: int = 0) -> None:
+            nonlocal completed
+            completed += advanced
+            if self.on_progress is not None:
+                self.on_progress(stage, completed, len(queries))
+
+        report("ingesting")
 
         if dataset.isolation_unit is not None:
             # Unit-sequential mode: ingest one unit's document then answer all its queries
@@ -332,7 +359,7 @@ class EvalRunner:
                 query_fields = {f.name for f in fields(QueryResult)}
                 for uid in docs_by_unit:
                     unit_queries = queries_by_unit[uid]
-                    if all(q.id in previous_rows for q in unit_queries):
+                    if all(q.id in previous_rows and not previous_rows[q.id].get("scoring_failed") for q in unit_queries):
                         prev_by_unit[uid] = [
                             QueryResult(**{k: v for k, v in previous_rows[q.id].items() if k in query_fields})
                             for q in unit_queries
@@ -367,8 +394,8 @@ class EvalRunner:
                         memory_provider=memory.name, run_name=effective_name,
                         mode=mode.name, oracle=oracle,
                         total_queries=len(done),
-                        correct=sum(1 for r in done if r.correct),
-                        accuracy=0.0, ingestion_time_ms=round(ingestion_ms, 1),
+                        correct=0,
+                        accuracy=None, ingestion_time_ms=round(ingestion_ms, 1),
                         ingested_docs=ingested_docs_count,
                         score_type=dataset.score_type,
                         description=description, answer_llm=mode.llm_id,
@@ -380,14 +407,17 @@ class EvalRunner:
                     nonlocal ingestion_ms, ingested_docs_count
                     if unit_id in prev_by_unit:
                         progress.advance(task_id, len(prev_by_unit[unit_id]))
+                        report("evaluating", len(prev_by_unit[unit_id]))
                         return
                     async with unit_sem:
                         if not skip_ingestion:
+                            report("ingesting")
                             t0 = time.perf_counter()
                             await memory.async_ingest(unit_docs)
                             ingestion_ms += (time.perf_counter() - t0) * 1000
                             ingested_docs_count += len(unit_docs)
 
+                        report("evaluating")
                         unit_queries = queries_by_unit.get(unit_id, [])
                         unit_results = [None] * len(unit_queries)
 
@@ -395,6 +425,7 @@ class EvalRunner:
                             async with sem:
                                 unit_results[i] = await _process_one(q)
                                 progress.advance(task_id)
+                                report("evaluating", 1)
 
                         await asyncio.gather(*[bounded(i, q) for i, q in enumerate(unit_queries)])
                         results_by_unit[unit_id] = unit_results
@@ -425,6 +456,8 @@ class EvalRunner:
                 avg = f" ({ingestion_ms / len(documents):.1f}ms/doc avg)" if documents else ""
                 console.print(f"  ingested in {ingestion_ms:.0f}ms{avg}\n")
 
+            report("evaluating")
+
             async def _run_all(progress, task_id):
                 concurrency = getattr(memory, "concurrency", _CONCURRENCY)
                 sem = asyncio.Semaphore(concurrency)
@@ -434,6 +467,7 @@ class EvalRunner:
                     async with sem:
                         results[i] = await _process_one(q)
                         progress.advance(task_id)
+                        report("evaluating", 1)
 
                 await asyncio.gather(*[bounded(i, q) for i, q in enumerate(queries)])
                 return results
@@ -452,13 +486,6 @@ class EvalRunner:
         if only_failed:
             results = self._merge(results, previous_rows)
 
-        correct_count = sum(1 for r in results if r.correct)
-        has_scores = any(r.score is not None for r in results)
-        if has_scores:
-            scored = [r.score for r in results if r.score is not None]
-            accuracy = sum(scored) / len(scored) if scored else 0.0
-        else:
-            accuracy = correct_count / len(results) if results else 0.0
         summary = EvalSummary(
             dataset=dataset.name,
             split=split,
@@ -468,8 +495,8 @@ class EvalRunner:
             mode=mode.name,
             oracle=oracle,
             total_queries=len(results),
-            correct=correct_count,
-            accuracy=accuracy,
+            correct=0,
+            accuracy=None,
             ingestion_time_ms=round(ingestion_ms, 1),
             ingested_docs=ingested_docs_count,
             score_type=dataset.score_type,
@@ -508,6 +535,22 @@ class EvalRunner:
     def _save(self, summary: EvalSummary) -> None:
         path = self._output_path(summary.dataset, summary.split, summary.run_name, summary.mode)
         path.parent.mkdir(parents=True, exist_ok=True)
+        # Normalize empty recalls from older BEAM results when resuming a run.
+        if summary.dataset == "beam":
+            for row in summary.results:
+                if row.score is None and not row.scoring_failed and row.judge_reason.startswith("empty context"):
+                    row.score = 0.0
+
+        summary.total_queries = len(summary.results)
+        summary.correct = sum(row.correct for row in summary.results)
+        summary.scoring_failed_queries = sum(row.scoring_failed for row in summary.results)
+        scored = [row.score for row in summary.results if row.score is not None]
+        if summary.scoring_failed_queries:
+            summary.accuracy = None
+        elif scored:
+            summary.accuracy = sum(scored) / len(scored)
+        else:
+            summary.accuracy = summary.correct / summary.total_queries if summary.total_queries else 0.0
         d = asdict(summary)
         if summary.ingestion_run_id is None:
             del d["ingestion_run_id"]
@@ -524,14 +567,6 @@ class EvalRunner:
         if summary.mode == "coding":
             d["view"] = "agent"   # the UI's multi-turn agent renderer
         results_dicts = d["results"]
-        d["total_queries"] = len(summary.results)
-        d["correct"] = sum(1 for r in summary.results if r.correct)
-        has_scores = any(r.score is not None for r in summary.results)
-        if has_scores:
-            scored = [r.score for r in summary.results if r.score is not None]
-            d["accuracy"] = sum(scored) / len(scored) if scored else 0.0
-        else:
-            d["accuracy"] = d["correct"] / d["total_queries"] if summary.results else 0.0
         rec_times  = [r["retrieve_time_ms"] for r in results_dicts if r.get("retrieve_time_ms") is not None]
         ctx_tokens = [r["context_tokens"]   for r in results_dicts if r.get("context_tokens")   is not None]
         d["avg_retrieve_time_ms"] = round(sum(rec_times)  / len(rec_times),  1) if rec_times  else None

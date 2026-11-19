@@ -116,25 +116,26 @@ create_seed smoke
 boot_vm smoke smoke.qcow2 2223 on
 "${guest_ssh[@]}" bash -se <<'SMOKE'
 set -o pipefail
+trap 'sudo docker ps -a >&2; sudo docker logs --tail 80 amb-workbench >&2' ERR
 systemctl is-enabled docker
 systemctl is-active docker
 test "$(sudo docker inspect --format '{{.HostConfig.RestartPolicy.Name}}' amb-workbench)" = unless-stopped
 python3 - <<'PY'
 import json
 import time
-from urllib.error import URLError
 from urllib.request import urlopen
 
 base = 'http://127.0.0.1:8090'
-for attempt in range(60):
+deadline = time.monotonic() + 180
+while True:
     try:
         with urlopen(f'{base}/api/config', timeout=3) as response:
             config = json.load(response)
         break
-    except URLError:
-        if attempt == 59:
+    except OSError:
+        if time.monotonic() >= deadline:
             raise
-        time.sleep(1)
+        time.sleep(2)
 assert set(config['datasets']) == {'locomo', 'beam', 'longmemeval', 'lifebench-v2', 'precisionmembench'}
 with urlopen(base, timeout=3) as response:
     assert b'evaluation-name' in response.read()

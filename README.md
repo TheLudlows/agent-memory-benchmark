@@ -103,7 +103,22 @@ uv run amb view
 或下载 AMB 逐题结果 JSON。
 
 1. 复制 `.env.example` 为 `.env`，填写回答和评分模型所用的 API Key。默认两者使用 Gemini。
-2. 启动评测台并打开 http://127.0.0.1:8090：
+2. 在 Linux x86_64 上，可以下载 [GitHub Actions](https://github.com/TheLudlows/agent-memory-benchmark/actions/workflows/workbench-image.yml) 中的 `amb-workbench-linux-amd64` 产物。解压 ZIP，再加载并启动：
+
+   ```sh
+   sha256sum -c amb-workbench-linux-amd64.tar.gz.sha256
+   docker load -i amb-workbench-linux-amd64.tar.gz
+   docker run -d --name amb-workbench --init --env-file .env \
+     --add-host=host.docker.internal:host-gateway \
+     -p 127.0.0.1:8090:8090 -v "$PWD/amb-results:/app/outputs" \
+     amb-workbench:local
+   ```
+
+   打开 http://127.0.0.1:8090。下载产物中附带 `amb.env.example`，可以直接用它创建 `.env`。
+   目标机只需 Docker。加载镜像、启动评测台和读取数据无需访问包仓库或数据源。
+   执行评测时，容器需要能访问选定的记忆后端以及回答和评分所用的模型 API。
+
+   在有源码和外网的机器上，也可以直接构建和启动：
 
    ```sh
    docker compose up --build amb-web
@@ -131,12 +146,12 @@ uv run amb view
 `OPENAI_BASE_URL`、`OPENAI_API_KEY`、`OMB_ANSWER_MODEL` 和 `OMB_JUDGE_MODEL`。模型端点需要支持
 Chat Completions 的 JSON Schema 输出，`OPENAI_BASE_URL` 应包含服务的 API 前缀（通常是 `/v1`）。ContextBase 和 Hindsight 在各自服务内配置写入和检索使用的模型。
 
-可选 split 为 LoCoMo `locomo10`、BEAM `100k / 500k / 1m / 10m`、LongMemEval `s`。Compose 镜像
-内置 LoCoMo，首次运行其他数据集时会下载数据。直接运行时可通过 `LOCOMO_DATA_PATH`、
-`LONGMEMEVAL_DATA_PATH` 指定本地数据。BEAM 按 split 使用 `BEAM_100K_DATA_PATH`、
+评测台镜像内置 LoCoMo `locomo10`、BEAM `100k / 500k / 1m / 10m` 和 LongMemEval `s`（cleaned 版本）。
+镜像构建固定数据版本并校验 SHA-256。授权与来源说明位于 `/opt/locomo` 和 `/opt/amb-datasets`。
+可通过 `LOCOMO_DATA_PATH`、`LONGMEMEVAL_DATA_PATH` 指定自备的本地数据。BEAM 按 split 使用 `BEAM_100K_DATA_PATH`、
 `BEAM_500K_DATA_PATH`、`BEAM_1M_DATA_PATH` 或 `BEAM_10M_DATA_PATH`。如果评测台继续使用
 `BEAM_DATA_PATH`，需要同时用 `BEAM_DATA_SPLIT` 指明文件所属的标准 split。没有指定本地文件的 split
-会使用对应的官方数据。比较不同后端时，请使用相同的 split、题数和回答及评分模型。
+会使用对应的官方数据。在未包含数据的本地安装中，首次使用时会下载。比较不同后端时，请使用相同的 split、题数和回答及评分模型。
 
 BEAM 有答案的题目如果没有召回内容，以 0 分计入平均分。数据集标注的拒答题（`abstention`）即使
 没有召回内容，也会按评分标准检查模型是否说明信息不足。评分服务失败时，运行标为「评分未完成」并显示失败题数。
@@ -145,7 +160,7 @@ BEAM 有答案的题目如果没有召回内容，以 0 分计入平均分。数
 评测台供本机单用户使用，一次运行一个评测。每次运行都有独立的 Hindsight Bank 名称或 Mem0 用户 ID；
 ContextBase 使用预授权的测试 Bank，并以运行和题目所属的隔离单元标签分开数据。停止评测会终止本地
 评测进程，之前已提交给后端的写入可能仍在处理。历史、日志和结果均保存在
-`amb-results/workbench/`（Compose）或 `outputs/workbench/`（直接运行）。
+`amb-results/workbench/`（Docker）或 `outputs/workbench/`（直接运行）。
 
 ### LoCoMo on ContextBase
 

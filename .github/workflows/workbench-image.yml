@@ -1,0 +1,111 @@
+name: AMB Workbench image
+
+on:
+  pull_request:
+    paths: &image_paths
+      - Dockerfile
+      - Dockerfile.dockerignore
+      - compose.yaml
+      - src/**
+      - pyproject.toml
+      - uv.lock
+      - .env.example
+      - .github/workflows/workbench-image.yml
+  push:
+    branches: [main]
+    paths: *image_paths
+  workflow_dispatch:
+
+jobs:
+  image:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build Linux AMD64 Workbench image
+        run: docker build --platform linux/amd64 --target workbench -t amb-workbench:local .
+      - name: Verify datasets and tokenizer offline
+        run: |
+          docker run --rm --network none -i --entrypoint python amb-workbench:local - <<'PY'
+          from memory_bench.dataset.beam import BEAMDataset
+          from memory_bench.dataset.locomo import LoComoDataset
+          from memory_bench.dataset.longmemeval import LongMemEvalDataset
+          from memory_bench.utils import count_tokens
+
+          assert count_tokens('Agent Memory Benchmark') > 0
+          cases = [
+              (LoComoDataset(), 'locomo10', 1540),
+              (BEAMDataset(), '100k', 400),
+              (BEAMDataset(), '500k', 700),
+              (BEAMDataset(), '1m', 700),
+              (BEAMDataset(), '10m', 200),
+              (LongMemEvalDataset(), 's', 500),
+          ]
+          for dataset, split, expected in cases:
+              queries = dataset.load_queries(split)
+              assert len(queries) == expected, (dataset.name, split, len(queries))
+              docs = dataset.load_documents(split, user_ids={queries[0].user_id})
+              assert docs and all(doc.content.strip() for doc in docs), (dataset.name, split)
+              print(f'{dataset.name}/{split}: {len(queries)} questions, {len(docs)} sample documents')
+          PY
+      - name: Start the Workbench offline
+        run: |
+          docker run --detach --network none --name amb-workbench-smoke amb-workbench:local
+          trap 'docker logs amb-workbench-smoke; docker rm -f amb-workbench-smoke' EXIT
+          docker exec -i amb-workbench-smoke python - <<'PY'
+          import json
+          import time
+          from urllib.error import URLError
+          from urllib.request import urlopen
+
+          base_url = 'http://127.0.0.1:8090'
+          for attempt in range(30):
+              try:
+                  with urlopen(f'{base_url}/api/config', timeout=2) as response:
+                      config = json.load(response)
+                  break
+              except URLError:
+                  if attempt == 29:
+                      raise
+                  time.sleep(1)
+          assert config['datasets'] == {
+              'locomo': ['locomo10'],
+              'beam': ['100k', '500k', '1m', '10m'],
+              'longmemeval': ['s'],
+          }, config['datasets']
+          assert set(config['backends']) == {'contextbase', 'mem0-cloud', 'hindsight-http'}
+          for path in ('/', '/assets/workbench.js', '/assets/workbench.css'):
+              with urlopen(f'{base_url}{path}', timeout=2) as response:
+                  assert response.read(), path
+          PY
+      - name: Export tested image and SHA-256 checksum
+        shell: bash
+        run: |
+          cd "$RUNNER_TEMP"
+          docker save amb-workbench:local | gzip -1 > amb-workbench-linux-amd64.tar.gz
+          sha256sum amb-workbench-linux-amd64.tar.gz > amb-workbench-linux-amd64.tar.gz.sha256
+          cp "$GITHUB_WORKSPACE/.env.example" amb.env.example
+      - uses: actions/upload-artifact@v4
+        with:
+          name: amb-workbench-linux-amd64
+          path: |
+            ${{ runner.temp }}/amb-workbench-linux-amd64.tar.gz
+            ${{ runner.temp }}/amb-workbench-linux-amd64.tar.gz.sha256
+            ${{ runner.temp }}/amb.env.example
+          compression-level: 0
+          if-no-files-found: error
+          retention-days: 14
+      - name: Publish tested image to GHCR
+        if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          image="ghcr.io/${GITHUB_REPOSITORY,,}"
+          echo "$GH_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+          docker tag amb-workbench:local "$image:workbench-sha-$GITHUB_SHA"
+          docker tag amb-workbench:local "$image:workbench"
+          docker push "$image:workbench-sha-$GITHUB_SHA"
+          docker push "$image:workbench"

@@ -23,9 +23,24 @@ ENTRYPOINT ["amb"]
 CMD ["run", "--dataset", "locomo", "--split", "locomo10", "--memory", "hindsight-http", "--mode", "rag"]
 
 
+FROM scratch AS workbench-data
+ADD --chmod=0444 --checksum=sha256:c0519be25907005ba873c927c50877471d550873039d96c041554d0075a78ace https://huggingface.co/datasets/Mohammadta/BEAM/resolve/3205395e897e7318c7b094ef4e6047b9b82dbb03/data/100K-00000-of-00001.parquet /beam/100k/100K-00000-of-00001.parquet
+ADD --chmod=0444 --checksum=sha256:af05921c979355038e1761b7cde3d2dd713200dd3071b278de0200f6c7f30122 https://huggingface.co/datasets/Mohammadta/BEAM/resolve/3205395e897e7318c7b094ef4e6047b9b82dbb03/data/500K-00000-of-00001.parquet /beam/500k/500K-00000-of-00001.parquet
+ADD --chmod=0444 --checksum=sha256:41b5acbbb55a586b1305514ef9d9fb03365d9b3331b598a1c2dd7603d93ef533 https://huggingface.co/datasets/Mohammadta/BEAM/resolve/3205395e897e7318c7b094ef4e6047b9b82dbb03/data/1M-00000-of-00001.parquet /beam/1m/1M-00000-of-00001.parquet
+ADD --chmod=0444 --checksum=sha256:31d96fd47ec56221d202e68792f26c00e49467dd4b36ee105c36ebd19ef78ad5 https://huggingface.co/datasets/Mohammadta/BEAM-10M/resolve/9b2096193fe74e2837e4713e483351e19817773c/data/10M-00000-of-00002.parquet /beam/10m/10M-00000-of-00002.parquet
+ADD --chmod=0444 --checksum=sha256:a4f13fe25af51d57405ae41008689c31d1421377f3efde56a024b441deb2ee65 https://huggingface.co/datasets/Mohammadta/BEAM-10M/resolve/9b2096193fe74e2837e4713e483351e19817773c/data/10M-00001-of-00002.parquet /beam/10m/10M-00001-of-00002.parquet
+ADD --chmod=0444 --checksum=sha256:d6f21ea9d60a0d56f34a05b609c79c88a451d2ae03597821ea3d5a9678c3a442 https://huggingface.co/datasets/xiaowu0162/longmemeval-cleaned/resolve/98d7416c24c778c2fee6e6f3006e7a073259d48f/longmemeval_s_cleaned.json /longmemeval/longmemeval_s_cleaned.json
+ADD --chmod=0444 https://huggingface.co/datasets/Mohammadta/BEAM/resolve/3205395e897e7318c7b094ef4e6047b9b82dbb03/README.md /beam/BEAM-dataset-card.md
+ADD --chmod=0444 https://huggingface.co/datasets/Mohammadta/BEAM-10M/resolve/9b2096193fe74e2837e4713e483351e19817773c/README.md /beam/BEAM-10M-dataset-card.md
+ADD --chmod=0444 https://raw.githubusercontent.com/xiaowu0162/LongMemEval/24cdd24b3f67843016cb779d7e7e4dba9be65042/LICENSE /longmemeval/LICENSE.txt
+
 FROM cli AS workbench
 RUN --mount=type=cache,target=/root/.cache/uv uv sync --frozen --only-group http-runner --only-group workbench \
     && uv pip install --no-deps --editable .
+COPY --from=workbench-data / /opt/amb-datasets/
+ENV BEAM_BUNDLED_DATA_DIR=/opt/amb-datasets/beam \
+    LONGMEMEVAL_DATA_PATH=/opt/amb-datasets/longmemeval/longmemeval_s_cleaned.json
+EXPOSE 8090
 CMD ["workbench", "--docker"]
 
 FROM cli AS default

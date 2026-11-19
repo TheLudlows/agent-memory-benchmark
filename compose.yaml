@@ -17,6 +17,7 @@ services:
 
   amb-web:
     profiles: ["web"]
+    image: amb-workbench:local
     build:
       context: .
       target: workbench

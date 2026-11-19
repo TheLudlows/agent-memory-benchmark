@@ -32,6 +32,7 @@ import logging
 import os
 import re
 import urllib.request
+from collections.abc import Iterable, Iterator
 from pathlib import Path
 
 from rich.console import Console
@@ -141,11 +142,14 @@ class BEAMDataset(Dataset):
         cache = dataset_cache_dir("beam")
         return cache / f"{split}.json"
 
-    def _load_raw(self, split: str) -> list[dict]:
+    def _load_raw(self, split: str, *, columns: list[str] | None = None) -> Iterable[dict]:
         local = local_data_path(split, require_split=self._require_local_split)
         if local:
             with open(local, encoding="utf-8") as f:
                 return json.load(f)
+
+        if bundled_dir := os.getenv("BEAM_BUNDLED_DATA_DIR"):
+            return self._read_bundled_parquet(Path(bundled_dir) / split, columns)
 
         path = self._cache_path(split)
         if not path.exists():
@@ -155,6 +159,19 @@ class BEAMDataset(Dataset):
 
         with open(path, encoding="utf-8") as f:
             return json.load(f)
+
+    @staticmethod
+    def _read_bundled_parquet(directory: Path, columns: list[str] | None) -> Iterator[dict]:
+        from pyarrow.parquet import ParquetFile
+
+        files = sorted(directory.glob("*.parquet"))
+        if not files:
+            raise FileNotFoundError(f"No bundled BEAM Parquet files in {directory}")
+        for path in files:
+            with ParquetFile(path) as parquet:
+                # Each 10M row contains a full conversation. Keep only one in memory.
+                for batch in parquet.iter_batches(batch_size=1, columns=columns):
+                    yield from batch.to_pylist()
 
     @staticmethod
     def _download(split: str, dest: Path) -> None:
@@ -275,7 +292,7 @@ class BEAMDataset(Dataset):
         ids: set[str] | None = None,
         user_ids: set[str] | None = None,
     ) -> list[Document]:
-        data = self._load_raw(split)
+        data = self._load_raw(split, columns=["conversation_id", "chat", "user_profile"])
         documents: list[Document] = []
 
         for item in data:
@@ -388,7 +405,7 @@ class BEAMDataset(Dataset):
         category: str | None = None,
         limit: int | None = None,
     ) -> list[Query]:
-        data = self._load_raw(split)
+        data = self._load_raw(split, columns=["conversation_id", "probing_questions"])
         queries: list[Query] = []
 
         for item in data:
@@ -830,12 +847,11 @@ Return JSON: {{"score": <0.0 or 0.5 or 1.0>, "reason": "<one concise sentence>"}
 
         for split in SPLITS:
             try:
-                data = self._load_raw(split)
-                n_convs = len(data)
-                n_questions = sum(
-                    sum(len(v) for v in self._parse_probing_questions(item).values())
-                    for item in data
-                )
+                data = self._load_raw(split, columns=["probing_questions"])
+                n_convs = n_questions = 0
+                for item in data:
+                    n_convs += 1
+                    n_questions += sum(len(v) for v in self._parse_probing_questions(item).values())
                 table.add_row(split, str(n_convs), str(n_questions))
             except Exception as e:
                 table.add_row(split, "—", f"error: {e}")

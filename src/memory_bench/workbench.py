@@ -16,6 +16,7 @@ from time import monotonic
 from typing import Annotated, Literal
 from uuid import uuid4
 
+import ijson
 from anyio import open_file
 from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.exception_handlers import request_validation_exception_handler
@@ -244,16 +245,18 @@ def _result_path(directory: Path, job: dict) -> Path:
 
 @lru_cache(maxsize=16)
 def _context_token_report(path: Path) -> tuple[float | None, list[dict]]:
-    # Completed run files are immutable. Cache only the fields used in the table.
-    result = _read_json(path)
-    rows = [
-        {"query_id": row["query_id"], "query": row.get("query", ""), "context_tokens": row.get("context_tokens")}
-        for row in result.get("results", [])
-    ]
-    average = result.get("avg_context_tokens")
-    if average is None:
-        counts = [row["context_tokens"] for row in rows if row["context_tokens"] is not None]
-        average = round(mean(counts), 1) if counts else None
+    # Completed run files are immutable. Read one result at a time and cache
+    # only the fields used in the table, without retaining the full contexts.
+    try:
+        with path.open("rb") as source:
+            rows = [
+                {"query_id": row["query_id"], "query": row.get("query", ""), "context_tokens": row.get("context_tokens")}
+                for row in ijson.items(source, "results.item")
+            ]
+    except FileNotFoundError:
+        return None, []
+    counts = [row["context_tokens"] for row in rows if row["context_tokens"] is not None]
+    average = round(mean(counts), 1) if counts else None
     return average, rows
 
 

@@ -1,6 +1,8 @@
+import io
+import json
 import socket
 
-from memory_bench.dataset import locomo_fixed
+from memory_bench.dataset import locomo, locomo_fixed
 from memory_bench.dataset.locomo import LoComoDataset
 from memory_bench.dataset.locomo_fixed import LoComoFixedDataset
 from memory_bench.memory.hindsight import _HindsightBase
@@ -57,6 +59,30 @@ def test_bundled_locomo_and_tokenizer_load_without_network(monkeypatch, tmp_path
     assert len(dataset.load_queries("locomo10")) == 1540
     assert len(dataset.load_documents("locomo10")) == 272
     assert count_tokens("LoCoMo 中文") == 5
+
+
+def test_locomo_downloads_only_when_the_bundle_and_cache_are_missing(monkeypatch, tmp_path):
+    monkeypatch.delenv("LOCOMO_DATA_PATH", raising=False)
+    monkeypatch.setattr(locomo, "_BUNDLED_DATA_PATH", tmp_path / "absent.json.xz")
+    monkeypatch.setattr(locomo, "dataset_cache_dir", lambda name: tmp_path)
+    source = json.dumps([_item()]).encode()
+    calls = []
+
+    def download(url, *, timeout):
+        calls.append(url)
+        return io.BytesIO(source)
+
+    monkeypatch.setattr(locomo, "urlopen", download)
+    cache = tmp_path / "locomo10.json"
+    cache.write_bytes(source)
+    assert len(LoComoFixedDataset().load_queries("locomo10")) == 2
+    assert not calls
+
+    cache.unlink()
+    assert len(LoComoDataset().load_queries("locomo10")) == 2
+    assert cache.read_bytes() == source
+    assert len(LoComoDataset().load_queries("locomo10")) == 2
+    assert calls == [locomo._DATA_URL]
 
 
 def test_reflect_gets_the_question_date_and_the_answer_rules():

@@ -144,7 +144,7 @@ Docker Compose 使用独立的 `amb-workbench-config` 卷。升级后，旧的 `
 没有保存网页默认配置时，系统使用 `.env` 中的 `OMB_ANSWER_LLM`、`OMB_ANSWER_MODEL`、`OMB_JUDGE_LLM`、`OMB_JUDGE_MODEL` 和相应提供方的 Key。页面可随时恢复这些默认值。ContextBase 和 Hindsight 在各自服务内配置写入和检索使用的模型。
 
 可选 split 为 LoCoMo `locomo10`、BEAM `100k / 500k / 1m / 10m`、LongMemEval `s`。代码库和镜像均
-内置 LoCoMo 原始数据和 `cl100k_base` 词表。安装好运行依赖后，首次运行 LoCoMo 也会从本地读取这两个文件。
+内置 LoCoMo 原始数据和 `cl100k_base` 词表。LoCoMo 优先读取内置数据，缺少内置文件时才检查本地缓存并回退到下载同一上游版本。
 离线环境下，运行评测的机器仍需能访问所选记忆后端和模型端点。可用 `LOCOMO_DATA_PATH` 覆盖内置数据。
 其他数据集可通过环境变量指定本地文件。LongMemEval 使用 `LONGMEMEVAL_DATA_PATH`，BEAM 按 split 使用 `BEAM_100K_DATA_PATH`、
 `BEAM_500K_DATA_PATH`、`BEAM_1M_DATA_PATH` 或 `BEAM_10M_DATA_PATH`。如果评测台继续使用

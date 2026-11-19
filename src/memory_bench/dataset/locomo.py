@@ -4,7 +4,8 @@ LoComo dataset (https://github.com/snap-research/locomo).
 A long-term conversation memory benchmark with 10 multi-session conversations
 and open-ended QA pairs over personal conversation history.
 
-The official data is bundled. Set LOCOMO_DATA_PATH to use another local copy.
+The official data is bundled. A checkout without the bundle can reuse a local
+cache or download the same upstream snapshot. LOCOMO_DATA_PATH overrides both.
 
 Structure
 ---------
@@ -27,14 +28,21 @@ import lzma
 import os
 from datetime import datetime, timezone
 from pathlib import Path
+from shutil import copyfileobj
+from urllib.request import urlopen
 
 from rich.console import Console
 from rich.table import Table
 
+from ._cache import dataset_cache_dir, staging_file
 from .base import Dataset
 from ..models import Document, Query
 
 _BUNDLED_DATA_PATH = Path(__file__).resolve().parents[1] / "assets" / "locomo" / "locomo10.json.xz"
+_DATA_URL = (
+    "https://raw.githubusercontent.com/snap-research/locomo/"
+    "3eb6f2c585f5e1699204e3c3bdf7adc5c28cb376/data/locomo10.json"
+)
 
 SPLITS = ["locomo10"]
 
@@ -85,8 +93,23 @@ class LoComoDataset(Dataset):
     # Internal helpers
     # ------------------------------------------------------------------
 
+    def _data_path(self) -> Path:
+        if self._local_path:
+            return self._local_path
+        if _BUNDLED_DATA_PATH.is_file():
+            return _BUNDLED_DATA_PATH
+
+        path = dataset_cache_dir("locomo") / "locomo10.json"
+        if not path.is_file():
+            with staging_file(path) as temporary:
+                with urlopen(_DATA_URL, timeout=90) as source, temporary.open("wb") as target:
+                    copyfileobj(source, target)
+                with temporary.open(encoding="utf-8") as data:
+                    json.load(data)
+        return path
+
     def _load_raw(self) -> list[dict]:
-        path = self._local_path or _BUNDLED_DATA_PATH
+        path = self._data_path()
         open_data = lzma.open if path.suffix == ".xz" else open
         with open_data(path, "rt", encoding="utf-8") as f:
             return json.load(f)

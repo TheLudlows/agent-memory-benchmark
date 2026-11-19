@@ -42,10 +42,17 @@ class GeminiJudge:
         from .llm import get_judge_llm
         self._llm = llm or get_judge_llm()
 
-    def score(self, query: str, answer: str, gold_answers: list[str], prompt_fn=None) -> JudgeResult:
+    def score(
+        self, query: str, answer: str, gold_answers: list[str], prompt_fn=None, *, strict: bool = False,
+    ) -> JudgeResult:
         prompt = prompt_fn(query, gold_answers, answer) if prompt_fn else None
         if not prompt:
             gold_str = "\n".join(f"- {a}" for a in gold_answers)
             prompt = _PROMPT.format(query=query, gold_answers=gold_str, answer=answer)
         data = self._llm.generate(prompt, _SCHEMA)
+        if strict and (
+            not isinstance(data, dict) or not isinstance(data.get("correct"), bool)
+            or not isinstance(data.get("reason"), str) or not data["reason"].strip()
+        ):
+            raise ScoringError("The model returned an invalid structured score.")
         return JudgeResult(correct=bool(data["correct"]), reason=data["reason"])

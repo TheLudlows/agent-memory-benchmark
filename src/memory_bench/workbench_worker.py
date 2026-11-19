@@ -11,6 +11,7 @@ from statistics import mean
 
 from .dataset import get_dataset
 from .dataset.beam import BEAMDataset
+from .judge import GeminiJudge, ScoringError
 from .memory import get_memory_provider
 from .memory.hindsight import HindsightHTTPMemoryProvider
 from .memory.mem0_cloud import Mem0CloudMemoryProvider
@@ -18,7 +19,7 @@ from .models import Document
 from .modes import get_mode
 from .runner import EvaluationProgress, EvalRunner
 from .workbench import SCORING_INCOMPLETE_EXIT_CODE, RunSelection, _read_json, write_json
-from .workbench_models import worker_model
+from .workbench_models import JudgeProbeExit, worker_model
 
 
 def run(directory: Path) -> int:
@@ -90,5 +91,25 @@ def run(directory: Path) -> int:
     return SCORING_INCOMPLETE_EXIT_CODE if summary.scoring_failed_queries else 0
 
 
+def probe_judge() -> int:
+    try:
+        judge = GeminiJudge(llm=worker_model("judge", json.load(sys.stdin)))
+        result = judge.score("What is 2 + 2?", "4", ["4"], strict=True)
+        return 0 if result.correct else JudgeProbeExit.INVALID_SCORE
+    except (ScoringError, json.JSONDecodeError):
+        return JudgeProbeExit.INVALID_SCORE
+    except Exception as exc:
+        status = getattr(exc, "status_code", None) or getattr(exc, "code", None)
+        if status in (401, 403):
+            return JudgeProbeExit.AUTH_FAILED
+        if status == 404:
+            return JudgeProbeExit.NOT_FOUND
+        if status in (400, 422):
+            return JudgeProbeExit.REQUEST_REJECTED
+        return JudgeProbeExit.REQUEST_FAILED
+
+
 if __name__ == "__main__":
+    if sys.argv[1] == "--probe-judge":
+        raise SystemExit(probe_judge())
     raise SystemExit(run(Path(sys.argv[1])))

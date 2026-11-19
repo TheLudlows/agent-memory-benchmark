@@ -22,6 +22,11 @@ let submitting = false;
 let savingConnection = false;
 let questionCountVersion = 0;
 
+const modelRoles = { answer: "回答模型", judge: "评分模型" };
+const providerLabels = { gemini: "Gemini", openai: "OpenAI 兼容", groq: "Groq" };
+const modelEditors = { global: {}, run: {} };
+const savingModels = new Set();
+
 async function api(path, options) {
   const response = await fetch(`/api${path}`, options);
   const data = await response.json();
@@ -121,6 +126,143 @@ async function saveConnection(action = "save") {
   }
 }
 
+function defaultModel(role, provider) {
+  return role === "judge" && provider === "gemini" && $("dataset").value === "beam"
+    ? settings.beam_default_judge_model : settings.model_services[provider]?.default_model || "";
+}
+
+function loadModelEditor(editor, provider = settings.models[editor.role].provider) {
+  const config = settings.models[editor.role];
+  const service = settings.model_services[provider];
+  editor.provider.value = provider;
+  const fallback = editor.scope === "run" ? defaultModel(editor.role, provider) : service?.default_model;
+  editor.model.value = (provider === config.provider && config.model) || fallback || "";
+  editor.url.value = (provider === config.provider && config.api_url) || service?.api_url || "";
+  editor.key.value = "";
+  setError(editor.message.id, "");
+}
+
+function modelInput(editor) {
+  return {
+    provider: editor.provider.value,
+    model: editor.model.value.trim(),
+    api_url: editor.provider.value === "openai" ? editor.url.value.trim() : "",
+    api_key: editor.key.value.trim() || null,
+  };
+}
+
+function modelHasKey(role, input) {
+  const config = settings.models[role];
+  const service = settings.model_services[input.provider];
+  const url = input.api_url.replace(/\/+$/, "");
+  return Boolean(input.api_key ||
+    (input.provider === config.provider && url === config.api_url && config.has_key) ||
+    (url === service?.api_url && service.has_key));
+}
+
+function updateModelEditor(editor) {
+  const input = modelInput(editor);
+  const override = editor.scope === "run";
+  const editing = !override || editor.toggle.checked;
+  const busy = savingModels.has(editor.role) || submitting;
+  editor.fields.hidden = !editing;
+  editor.urlRow.hidden = input.provider !== "openai";
+  editor.toggle.disabled = busy;
+  for (const field of [editor.provider, editor.model, editor.key]) field.disabled = busy || !editing;
+  editor.url.disabled = busy || !editing || input.provider !== "openai";
+  const hasKey = modelHasKey(editor.role, { ...input, api_key: null });
+  editor.key.placeholder = hasKey ? "已配置，留空继续使用" : "填写模型 API Key";
+  editor.reset.hidden = !settings.models[editor.role].saved;
+  editor.reset.disabled = busy;
+  editor.save.disabled = busy || Boolean(modelInputError(editor, input));
+
+  const config = settings.models[editor.role];
+  const model = config.model || defaultModel(editor.role, config.provider);
+  const label = providerLabels[config.provider];
+  editor.summary.hidden = editing && override;
+  editor.summary.textContent = label && model
+    ? `全局默认：${label} · ${model}${config.has_key ? "" : "（缺少 Key）"}`
+    : "请选择提供方并保存默认模型。";
+}
+
+function modelInputError(editor, input) {
+  const label = modelRoles[editor.role];
+  if (!input.provider || !input.model) return `请填写${label}的提供方和模型 ID。`;
+  if (input.provider === "openai" && (!input.api_url || !editor.url.validity.valid)) {
+    return `请填写${label}的 API 地址。`;
+  }
+  return modelHasKey(editor.role, input) ? "" : `请填写${label}的 API Key。`;
+}
+
+function modelRunError() {
+  for (const [role, editor] of Object.entries(modelEditors.run)) {
+    if (editor.toggle.checked) {
+      const error = modelInputError(editor, modelInput(editor));
+      if (error) return error;
+    } else if (!settings.models[role].has_key) {
+      return `请在「全局模型设置」配置${modelRoles[role]}，或为本轮单独指定。`;
+    }
+  }
+  return "";
+}
+
+async function saveModel(editor, reset = false) {
+  const { role } = editor;
+  const input = modelInput(editor);
+  if (savingModels.has(role) || (!reset && modelInputError(editor, input))) return;
+  savingModels.add(role);
+  updateForm();
+  try {
+    const request = reset ? {} : { headers: {"Content-Type": "application/json"}, body: JSON.stringify(input) };
+    settings.models[role] = await api(`/models/${role}${reset ? "/reset" : ""}`, { method: "POST", ...request });
+    loadModelEditor(editor);
+    const runEditor = modelEditors.run[role];
+    if (!runEditor.toggle.checked) loadModelEditor(runEditor);
+    setError(editor.message.id, reset ? "已恢复 .env 默认配置。" : "已保存全局默认模型。");
+  } catch (error) {
+    setError(editor.message.id, error.message);
+  } finally {
+    savingModels.delete(role);
+    updateForm();
+  }
+}
+
+function createModelEditor(scope, role) {
+  const template = $("model-editor").content.cloneNode(true);
+  const editor = { scope, role };
+  for (const part of template.querySelectorAll("[data-part]")) {
+    const name = part.dataset.part;
+    part.id = `${scope}-${role}-${name}`;
+    const property = name.replace(/-([a-z])/g, (_, letter) => letter.toUpperCase());
+    editor[property] = part;
+  }
+  for (const label of template.querySelectorAll("[data-for]")) label.htmlFor = editor[label.dataset.for].id;
+  editor.title.textContent = modelRoles[role];
+  editor.toggleRow.hidden = scope === "global";
+  editor.actions.hidden = scope === "run";
+  const providers = Object.keys(settings.model_services).map((provider) => new Option(providerLabels[provider], provider));
+  editor.provider.replaceChildren(...providers);
+  $(`${scope}-models`).append(template);
+  loadModelEditor(editor);
+  editor.provider.addEventListener("change", () => {
+    loadModelEditor(editor, editor.provider.value);
+    updateForm();
+  });
+  editor.toggle.addEventListener("change", () => {
+    loadModelEditor(editor);
+    updateForm();
+  });
+  for (const input of [editor.model, editor.url, editor.key]) {
+    input.addEventListener("input", () => {
+      setError(editor.message.id, "");
+      updateForm();
+    });
+  }
+  editor.save.addEventListener("click", () => saveModel(editor));
+  editor.reset.addEventListener("click", () => saveModel(editor, true));
+  modelEditors[scope][role] = editor;
+}
+
 function updateForm() {
   if (!settings) return;
   const backend = $("backend").value;
@@ -139,7 +281,10 @@ function updateForm() {
   $("connection-key").placeholder = config.key_optional ? "选填" : "请输入本轮 API Key";
   const usingSaved = $("connection-reuse").checked;
   const splitError = settings.split_errors?.[$("dataset").value]?.[$("split").value];
-  const modelError = settings.missing_models.length ? `请在 .env 配置 ${settings.missing_models.join("、")}` : "";
+  for (const editors of Object.values(modelEditors)) {
+    for (const editor of Object.values(editors)) updateModelEditor(editor);
+  }
+  const modelError = modelRunError();
   const ready = $("evaluation-name").value.trim() && connection.api_url &&
     (config.key_optional || connection.api_key || usingSaved) &&
     (backend !== "contextbase" || connection.bank_id || (sameUrl && config.has_bank_mapping));
@@ -148,13 +293,7 @@ function updateForm() {
     $(id).disabled = savingConnection || submitting;
   }
   $("connection-key").disabled = savingConnection || submitting || usingSaved;
-  for (const role of ["answer", "judge"]) {
-    const { provider, model } = settings.models[role];
-    const fallback = provider === "gemini" && role === "judge" && $("dataset").value === "beam"
-      ? "gemini-3.5-flash" : "默认模型";
-    $(`${role}-model`).textContent = `${provider} · ${model || fallback}`;
-  }
-  $("start").disabled = submitting || savingConnection || activeJob || !ready || Boolean(splitError || modelError);
+  $("start").disabled = submitting || savingConnection || savingModels.size > 0 || activeJob || !ready || Boolean(splitError || modelError);
   $("start").textContent = submitting ? "正在启动…" : activeJob ? "已有评测运行中" : "开始评测";
 }
 
@@ -191,21 +330,36 @@ function bars(container, rows, maximum, format) {
   }));
 }
 
+function storedModelLabel(job, role) {
+  const saved = job.models?.[role];
+  return job.summary?.[`${role}_llm`] || (saved?.model ? `${saved.provider}:${saved.model}` : null);
+}
+
+function storedModelDetail(job, role) {
+  const label = storedModelLabel(job, role) || job.models?.[role]?.provider || "—";
+  const source = job.models?.[role]?.source;
+  return `${label}${source === "override" ? "（本轮指定）" : ""}`;
+}
+
 function comparisonWarning(runs) {
   const differs = (values) => new Set(values.filter((value) => value != null && value !== "")).size > 1;
   const questions = runs.map((run) => run.summary.question_fingerprint);
   const documents = runs.map((run) => run.summary.document_fingerprint);
-  const answerModels = runs.map((run) => run.summary.answer_llm);
-  const judgeModels = runs.map((run) => run.summary.judge_llm);
+  const answerModels = runs.map((run) => storedModelLabel(run, "answer"));
+  const judgeModels = runs.map((run) => storedModelLabel(run, "judge"));
+  const endpoints = (role) => runs.map((run) => run.models?.[role]?.api_url);
   const selectionDiffers = ["dataset", "split"].some((key) => differs(runs.map((run) => run.selection[key])));
   const mismatches = [];
   if (selectionDiffers || differs(questions) || differs(runs.map((run) => run.summary.total_queries))) {
     mismatches.push("题目");
   }
   if (differs(documents)) mismatches.push("写入资料");
-  if (differs(answerModels)) mismatches.push("回答模型");
-  if (differs(judgeModels)) mismatches.push("评分模型");
-  const missing = [questions, documents, answerModels, judgeModels].some((values) => values.some((value) => !value));
+  if (differs(answerModels) || differs(endpoints("answer"))) mismatches.push("回答模型");
+  if (differs(judgeModels) || differs(endpoints("judge"))) mismatches.push("评分模型");
+  const missingEndpoint = ["answer", "judge"].some((role) => runs.some((run) =>
+    storedModelLabel(run, role)?.startsWith("openai:") && !run.models?.[role]?.api_url));
+  const missing = missingEndpoint || [questions, documents, answerModels, judgeModels]
+    .some((values) => values.some((value) => !value));
   const unknown = "部分评测缺少题目、写入资料或模型信息，无法确认这些评测的口径。";
   if (mismatches.length) {
     return `${mismatches.join("、")}不同，分数不可直接比较。` + (missing ? unknown : "");
@@ -237,7 +391,7 @@ async function drawComparison() {
       const item = document.createElement("li");
       const count = run.summary.total_queries;
       item.textContent = `${i + 1}. ${title(run)} · ${runType(run)} · ${count ?? "—"} 题` +
-        ` · 回答 ${run.summary.answer_llm || "—"} · 评分 ${run.summary.judge_llm || "—"}` +
+        ` · 回答 ${storedModelDetail(run, "answer")} · 评分 ${storedModelDetail(run, "judge")}` +
         (run.summary.scoring_failed_queries ? ` · 评分失败 ${run.summary.scoring_failed_queries} 题` : "");
       $("compare-meta").append(item);
     }
@@ -342,8 +496,7 @@ async function loadDetail(id) {
   $("empty").hidden = true;
   $("run-detail").hidden = false;
   $("run-name").textContent = title(job);
-  const modelLabel = (role) => job.summary[`${role}_llm`] || job.models[role].model || job.models[role].provider;
-  $("run-meta").textContent = `${runType(job)} · ${formatDate(job.started_at)} · 回答 ${modelLabel("answer")} · 评分 ${modelLabel("judge")}`;
+  $("run-meta").textContent = `${runType(job)} · ${formatDate(job.started_at)} · 回答 ${storedModelDetail(job, "answer")} · 评分 ${storedModelDetail(job, "judge")}`;
   const target = job.target;
   $("run-target").hidden = !target?.api_url;
   $("run-target").textContent = target?.api_url
@@ -425,6 +578,10 @@ $("run-form").addEventListener("submit", async (event) => {
   if ($("start").disabled) return;
   setError("form-error", "");
   const connection = { ...connectionInput(), use_saved_key: $("connection-reuse").checked };
+  const models = {};
+  for (const [role, editor] of Object.entries(modelEditors.run)) {
+    if (editor.toggle.checked) models[role] = modelInput(editor);
+  }
   submitting = true;
   updateForm();
   try {
@@ -434,6 +591,7 @@ $("run-form").addEventListener("submit", async (event) => {
       body: JSON.stringify({
         name: $("evaluation-name").value.trim(),
         connection,
+        models,
         dataset: $("dataset").value,
         split: $("split").value,
         backend: $("backend").value,
@@ -444,6 +602,10 @@ $("run-form").addEventListener("submit", async (event) => {
     historyOffset = 0;
     $("evaluation-name").value = "";
     clearRunKey();
+    for (const editor of Object.values(modelEditors.run)) {
+      editor.toggle.checked = false;
+      loadModelEditor(editor);
+    }
     await refresh();
   } catch (error) {
     setError("form-error", error.message);
@@ -493,8 +655,14 @@ async function init() {
     settings = await api("/config");
     options("dataset", Object.keys(settings.datasets).map((key) => [key, names[key]]));
     options("backend", Object.entries(settings.backends).map(([key, value]) => [key, value.label]));
+    options("split", settings.datasets[$("dataset").value].map((item) => [item, item]));
+    for (const role of Object.keys(modelRoles)) {
+      createModelEditor("run", role);
+      createModelEditor("global", role);
+    }
+    $("model-settings").hidden = false;
     loadConnection();
-    updateSplits();
+    updateQuestionCount();
     await poll();
   } catch (error) {
     setError("form-error", error.message);

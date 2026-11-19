@@ -39,10 +39,7 @@ class ConnectionInput(BaseModel):
     bank_id: str = Field(default="", max_length=256)
 
     def supplied_key(self) -> str:
-        key = self.api_key.get_secret_value().strip() if self.api_key else ""
-        if any(ord(char) < 32 or ord(char) == 127 for char in key):
-            raise ValueError("API Key 不能包含换行或控制字符。")
-        return key
+        return clean_api_key(self.api_key)
 
 
 class ConnectionUpdate(ConnectionInput):
@@ -53,7 +50,14 @@ class RunConnection(ConnectionInput):
     use_saved_key: bool = False
 
 
-def _api_url(value: str) -> str:
+def clean_api_key(value: SecretStr | None) -> str:
+    key = value.get_secret_value().strip() if value else ""
+    if any(ord(char) < 32 or ord(char) == 127 for char in key):
+        raise ValueError("API Key 不能包含换行或控制字符。")
+    return key
+
+
+def validate_api_url(value: str) -> str:
     value = value.strip()
     invalid = "请填写 HTTP 或 HTTPS API 地址，地址中不能包含用户名、密码、查询参数或片段。"
     try:
@@ -98,7 +102,7 @@ class Connection:
 def _environment_connection(backend: BackendId) -> Connection:
     spec = BACKENDS[backend]
     try:
-        api_url = _api_url(os.getenv(spec.url_env, "").strip() or spec.default_url)
+        api_url = validate_api_url(os.getenv(spec.url_env, "").strip() or spec.default_url)
     except ValueError:
         api_url = ""
     key = os.getenv(spec.key_env, "").strip()
@@ -108,6 +112,21 @@ def _environment_connection(backend: BackendId) -> Connection:
         return Connection(api_url, key, os.getenv("CONTEXTBASE_BANK_ID", "").strip(),
                           os.getenv("CONTEXTBASE_BENCH_BANKS", "").strip())
     return Connection(api_url, key)
+
+
+def write_private_json(path: Path, data: dict) -> None:
+    path.parent.mkdir(parents=True, mode=0o700, exist_ok=True)
+    temporary = None
+    try:
+        # NamedTemporaryFile creates owner-only files on POSIX. Rename preserves those permissions.
+        with NamedTemporaryFile(mode="w", encoding="utf-8", dir=path.parent,
+                                prefix=f".{path.stem}-", delete=False) as fh:
+            temporary = Path(fh.name)
+            json.dump(data, fh, ensure_ascii=False)
+        temporary.replace(path)
+    finally:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
 
 
 class Connections:
@@ -145,24 +164,11 @@ class Connections:
             return {backend: self._public(backend) for backend in BACKENDS}
 
     def _write(self, connections: dict[BackendId, Connection]) -> None:
-        # The file is outside the public assets directory. NamedTemporaryFile creates it with
-        # owner-only permissions on POSIX and keeps those permissions after the atomic rename.
-        self.path.parent.mkdir(parents=True, mode=0o700, exist_ok=True)
-        data = {name: asdict(connection) for name, connection in connections.items()}
-        temporary = None
-        try:
-            with NamedTemporaryFile(mode="w", encoding="utf-8", dir=self.path.parent,
-                                    prefix=".connections-", delete=False) as fh:
-                temporary = Path(fh.name)
-                json.dump(data, fh, ensure_ascii=False)
-            temporary.replace(self.path)
-        finally:
-            if temporary is not None:
-                temporary.unlink(missing_ok=True)
+        write_private_json(self.path, {name: asdict(connection) for name, connection in connections.items()})
         self.saved = connections
 
     def save(self, backend: BackendId, update: ConnectionUpdate) -> dict:
-        api_url = _api_url(update.api_url)
+        api_url = validate_api_url(update.api_url)
         supplied_key = update.supplied_key()
         if update.clear_key and (not BACKENDS[backend].key_optional or supplied_key):
             raise ValueError("只有 Hindsight 可以清除 Key，清除时请留空 Key 输入框。")
@@ -190,7 +196,7 @@ class Connections:
             return self._public(backend)
 
     def for_run(self, backend: BackendId, request: RunConnection) -> Connection:
-        api_url = _api_url(request.api_url)
+        api_url = validate_api_url(request.api_url)
         key = request.supplied_key()
         with self.lock:
             current = self._get(backend)

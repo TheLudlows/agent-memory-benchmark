@@ -11,7 +11,6 @@ from statistics import mean
 
 from .dataset import get_dataset
 from .dataset.beam import BEAMDataset
-from .llm import get_answer_llm
 from .memory import get_memory_provider
 from .memory.hindsight import HindsightHTTPMemoryProvider
 from .memory.mem0_cloud import Mem0CloudMemoryProvider
@@ -19,6 +18,7 @@ from .models import Document
 from .modes import get_mode
 from .runner import EvaluationProgress, EvalRunner
 from .workbench import SCORING_INCOMPLETE_EXIT_CODE, RunSelection, _read_json, write_json
+from .workbench_models import worker_model
 
 
 def run(directory: Path) -> int:
@@ -49,11 +49,15 @@ def run(directory: Path) -> int:
             item = json.dumps(asdict(document), ensure_ascii=False, sort_keys=True)
             document_digest.update((item + "\n").encode("utf-8"))
 
-    runner = EvalRunner(output_dir=directory / "results", on_progress=progress, on_documents=record_documents)
+    models = job["models"]
+    runner = EvalRunner(
+        output_dir=directory / "results", on_progress=progress, on_documents=record_documents,
+        judge_llm=worker_model("judge", models["judge"]),
+    )
     dataset = BEAMDataset(require_local_split=True) if spec.dataset == "beam" else get_dataset(spec.dataset)
     summary = runner.run(
         dataset=dataset, split=spec.split, memory=memory,
-        mode=get_mode("rag", llm=get_answer_llm()), query_limit=spec.query_limit, run_name="web-" + run_id,
+        mode=get_mode("rag", llm=worker_model("answer", models["answer"])), query_limit=spec.query_limit, run_name="web-" + run_id,
         description=job.get("name"),
     )
     if not expected_queries or summary.total_queries != expected_queries:

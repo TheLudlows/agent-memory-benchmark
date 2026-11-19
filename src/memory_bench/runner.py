@@ -20,6 +20,7 @@ logger = logging.getLogger(__name__)
 
 from .dataset.base import Dataset
 from .judge import GeminiJudge, ScoringError
+from .llm.base import LLM
 from .memory.base import MemoryProvider
 from .modes.base import ResponseMode
 from .models import Document, EvalSummary, QueryResult
@@ -53,16 +54,19 @@ class EvalRunner:
         self, output_dir: Path = Path("outputs"),
         on_progress: Callable[[EvaluationProgress], None] | None = None,
         on_documents: Callable[[Iterable[Document]], None] | None = None,
+        *,
+        judge_llm: LLM | None = None,
     ):
         self.output_dir = output_dir
         self.on_progress = on_progress
         self.on_documents = on_documents
+        self._judge_llm = judge_llm
         self._judge: GeminiJudge | None = None  # built on first use: retrieval runs need no LLM key
         self._dataset_metrics: dict = {}
 
     def _get_judge(self, dataset: Dataset) -> "GeminiJudge":
         if self._judge is None:
-            self._judge = GeminiJudge(llm=dataset.default_judge_llm())
+            self._judge = GeminiJudge(llm=self._judge_llm or dataset.default_judge_llm())
         return self._judge
 
     def run(

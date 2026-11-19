@@ -9,9 +9,11 @@ _RETRY_BASE_DELAY = 5
 
 
 class GroqLLM(LLM):
-    def __init__(self, model: str = "openai/gpt-oss-120b"):
+    DEFAULT_MODEL = "openai/gpt-oss-120b"
+
+    def __init__(self, model: str = DEFAULT_MODEL, *, api_key: str | None = None):
         from groq import Groq
-        self._client = Groq(api_key=os.environ.get("GROQ_API_KEY"))
+        self._client = Groq(api_key=api_key or os.environ.get("GROQ_API_KEY"))
         self._model = model
 
     @property

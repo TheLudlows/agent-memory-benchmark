@@ -48,8 +48,8 @@ def mock_services():
 
         def do_POST(self):
             body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
-            calls.append((self.path, body))
-            if self.path == "/v1/chat/completions":
+            if self.path.endswith("/chat/completions"):
+                calls.append((self.path, {**body, "authorization": self.headers.get("Authorization")}))
                 if body["model"] == "judge-fail":
                     self.send_json({"error": {"message": "test judge unavailable"}}, status=401)
                     return
@@ -63,7 +63,9 @@ def mock_services():
                     values["answer"] = "$120,000"
                     values["score"] = 0.0
                 self.send_json({"choices": [{"message": {"content": json.dumps({key: values[key] for key in schema})}}]})
-            elif self.path.endswith("/memories"):
+                return
+            calls.append((self.path, body))
+            if self.path.endswith("/memories"):
                 if self.headers.get("Authorization") != "Bearer test-bearer-value" or "/banks/ui-bank/" not in self.path:
                     self.send_json({"error": "Incorrect Workbench backend configuration"}, status=403)
                     return
@@ -86,6 +88,17 @@ def mock_services():
         finally:
             server.shutdown()
             thread.join()
+
+
+def await_result(client, response):
+    assert response.status_code == 201, response.text
+    detail_url = f"/api/runs/{response.json()['id']}"
+    deadline = time.monotonic() + 40
+    while True:
+        detail = client.get(detail_url).json()
+        if detail["status"] != "running" or time.monotonic() >= deadline:
+            return detail_url, detail
+        time.sleep(0.1)
 
 
 def test_standard_question_counts_without_loading_datasets(monkeypatch, tmp_path):
@@ -157,16 +170,6 @@ def test_datasets_run_through_local_api_and_worker(monkeypatch, tmp_path, mock_s
             "haystack_session_ids": ["same", "same"],
         }),
     ]
-
-    def await_result(client, response):
-        assert response.status_code == 201, response.text
-        detail_url = f"/api/runs/{response.json()['id']}"
-        deadline = time.monotonic() + 40
-        while True:
-            detail = client.get(detail_url).json()
-            if detail["status"] != "running" or time.monotonic() >= deadline:
-                return detail_url, detail
-            time.sleep(0.1)
 
     results_dir = tmp_path / "runs"
     with TestClient(create_app(results_dir), base_url="http://127.0.0.1") as client:
@@ -634,3 +637,105 @@ def test_workbench_refuses_config_directory_inside_results(monkeypatch, tmp_path
     monkeypatch.setenv("AMB_WORKBENCH_CONFIG_DIR", str(results / "config"))
     with pytest.raises(ValueError, match="outside the Workbench results directory"):
         create_app(results)
+
+
+def test_workbench_runs_use_independent_model_overrides(monkeypatch, tmp_path, mock_services, private_workbench_config):
+    endpoint, calls = mock_services
+    for name in ("OPENAI_API_KEY", "GEMINI_API_KEY", "GOOGLE_API_KEY", "GROQ_API_KEY"):
+        monkeypatch.delenv(name, raising=False)
+    for name in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("OMB_ANSWER_LLM", "gemini")
+    monkeypatch.setenv("OMB_JUDGE_LLM", "gemini")
+    monkeypatch.delenv("OMB_JUDGE_MODEL", raising=False)
+    monkeypatch.setenv("OPENAI_BASE_URL", endpoint + "/environment/v1")
+    monkeypatch.setenv("OPENAI_API_KEY", "environment-model-key")
+    monkeypatch.setenv("PYTHONPATH", str(Path(__file__).resolve().parents[1] / "src"))
+    dataset_path = tmp_path / "long.json"
+    dataset_path.write_text(json.dumps([{
+        "question_id": "round", "question_type": "single-session-user",
+        "question": "Where?", "answer": "Paris", "haystack_dates": ["2023/05/01"],
+        "haystack_sessions": [[{"role": "user", "content": "The location is Paris", "has_answer": True}]],
+        "haystack_session_ids": ["session"],
+    }]))
+    monkeypatch.setenv("LONGMEMEVAL_DATA_PATH", str(dataset_path))
+
+    directory = tmp_path / "runs"
+    selection = {
+        "name": "Model settings", "backend": "contextbase", "dataset": "longmemeval", "split": "s",
+        "query_limit": 1, "connection": {"api_url": endpoint, "api_key": "test-bearer-value", "bank_id": "ui-bank"},
+    }
+
+    def config(model, service, key=None):
+        return {"provider": "openai", "model": model, "api_url": f"{endpoint}/{service}/v1", "api_key": key}
+
+    def assert_run_models(client, response, answer, judge):
+        url, detail = await_result(client, response)
+        assert detail["status"] == "completed", detail["log"]
+        for role, (name, source, service, key) in {"answer": answer, "judge": judge}.items():
+            assert detail["summary"][f"{role}_llm"] == f"openai:{name}"
+            assert detail["models"][role] == {
+                "provider": "openai", "model": name, "source": source, "api_url": f"{endpoint}/{service}/v1",
+            }
+            assert any(path == f"/{service}/v1/chat/completions" and
+                       call["model"] == name and call["authorization"] == f"Bearer {key}" for path, call in calls)
+        for path in (url, url + "/result", "/api/config", "/api/runs"):
+            text = client.get(path).text
+            for key in [answer[3], judge[3]]:
+                assert key not in text
+        return url
+
+    with TestClient(create_app(directory), base_url="http://127.0.0.1") as client:
+        invalid = client.post("/api/models/answer", json=config("bad", "answer", {"secret": "invalid-model-key"}))
+        assert invalid.status_code == 422 and "invalid-model-key" not in invalid.text
+        no_key = client.post("/api/models/judge", json=config("judge-default", "judge"))
+        assert no_key.status_code == 422 and "API Key" in no_key.json()["detail"]
+        saved = client.post("/api/models/judge", json=config("judge-default", "judge", "saved-judge-key"))
+        assert saved.status_code == 200 and saved.json()["has_key"]
+        assert "saved-judge-key" not in saved.text
+        assert client.post("/api/runs", json=selection).status_code == 422
+
+        override = config("answer-round", "answer-round", "override-answer-key")
+        invalid = client.post("/api/runs", json={**selection, "models": {"answer": {**override, "model": ""}}})
+        assert invalid.status_code == 422 and "override-answer-key" not in invalid.text
+        run = client.post("/api/runs", json={**selection, "models": {"answer": override}})
+        assert run.status_code == 201, run.text
+        assert client.post("/api/models/judge", json=config("judge-updated", "judge")).status_code == 200
+        first_url = assert_run_models(client, run, ("answer-round", "override", "answer-round", "override-answer-key"),
+                                      ("judge-default", "global", "judge", "saved-judge-key"))
+        answer = client.post("/api/models/answer", json=config("answer-default", "environment"))
+        assert answer.status_code == 200 and answer.json()["has_key"]
+
+    with TestClient(create_app(directory), base_url="http://127.0.0.1") as client:
+        models = client.get("/api/config").json()["models"]
+        assert models["answer"]["model"] == "answer-default"
+        assert models["judge"]["model"] == "judge-updated"
+        assert client.get(first_url).json()["models"]["judge"]["model"] == "judge-default"
+        response = client.post("/api/runs", json={
+            **selection, "models": {"judge": config("judge-round", "judge-round", "override-judge-key")},
+        })
+        assert_run_models(client, response, ("answer-default", "global", "environment", "environment-model-key"),
+                          ("judge-round", "override", "judge-round", "override-judge-key"))
+        assert client.get("/api/config").json()["models"]["judge"]["model"] == "judge-updated"
+        assert client.post("/api/models/judge/reset").json()["provider"] == "gemini"
+        storage, = private_workbench_config.glob("*/models.json")
+        assert storage.stat().st_mode & 0o077 == 0
+        assert "override-" not in storage.read_text(encoding="utf-8")
+        assert "saved-judge-key" not in storage.read_text(encoding="utf-8")
+        assert "environment-model-key" not in storage.read_text(encoding="utf-8")
+        assert not list(directory.rglob("models.json"))
+
+
+def test_workbench_keeps_beam_judge_default(monkeypatch, tmp_path):
+    from memory_bench.workbench_models import ModelSettings, RunModels
+
+    monkeypatch.setenv("GEMINI_API_KEY", "test-gemini-key")
+    monkeypatch.setenv("OMB_ANSWER_LLM", "gemini")
+    monkeypatch.setenv("OMB_JUDGE_LLM", "gemini")
+    monkeypatch.delenv("OMB_ANSWER_MODEL", raising=False)
+    monkeypatch.delenv("OMB_JUDGE_MODEL", raising=False)
+    settings = ModelSettings(tmp_path / "models.json")
+    beam, _ = settings.for_run("beam", RunModels())
+    locomo, _ = settings.for_run("locomo", RunModels())
+    assert beam["judge"]["model"] == "gemini-3.5-flash"
+    assert beam["answer"]["model"] == locomo["judge"]["model"] == "gemini-2.5-flash-lite"

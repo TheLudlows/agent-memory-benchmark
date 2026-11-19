@@ -25,6 +25,7 @@ services:
       - path: .env
         required: false
     environment:
+      AMB_WORKBENCH_CONFIG_DIR: /app/workbench-config
       HINDSIGHT_HTTP_URL: ${HINDSIGHT_HTTP_URL:-http://host.docker.internal:8888}
     extra_hosts:
       - host.docker.internal:host-gateway
@@ -32,9 +33,11 @@ services:
       - "127.0.0.1:8090:8090"
     volumes:
       - ./amb-results:/app/outputs
+      - amb-workbench-config:/app/workbench-config
       - amb-datasets:/app/.datasets
       - amb-hf-cache:/root/.cache/huggingface
 
 volumes:
+  amb-workbench-config:
   amb-datasets:
   amb-hf-cache:

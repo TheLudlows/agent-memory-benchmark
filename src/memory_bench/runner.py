@@ -2,8 +2,8 @@ import asyncio
 import json
 import logging
 import time
-from collections.abc import Callable
-from dataclasses import asdict, fields
+from collections.abc import Callable, Iterable
+from dataclasses import asdict, dataclass, fields
 from pathlib import Path
 from uuid import uuid4
 
@@ -22,7 +22,7 @@ from .dataset.base import Dataset
 from .judge import GeminiJudge, ScoringError
 from .memory.base import MemoryProvider
 from .modes.base import ResponseMode
-from .models import EvalSummary, QueryResult
+from .models import Document, EvalSummary, QueryResult
 
 console = Console()
 
@@ -39,13 +39,24 @@ def _score_mcq(answer: str, gold_answers: list[str]) -> tuple[bool, str]:
     return False, f"expected one of {gold_answers!r}, got {answer!r}"
 
 
+@dataclass(frozen=True)
+class EvaluationProgress:
+    stage: str
+    completed: int = 0
+    total: int = 0
+    ingested_docs: int = 0
+    total_docs: int | None = None
+
+
 class EvalRunner:
     def __init__(
         self, output_dir: Path = Path("outputs"),
-        on_progress: Callable[[str, int, int], None] | None = None,
+        on_progress: Callable[[EvaluationProgress], None] | None = None,
+        on_documents: Callable[[Iterable[Document]], None] | None = None,
     ):
         self.output_dir = output_dir
         self.on_progress = on_progress
+        self.on_documents = on_documents
         self._judge: GeminiJudge | None = None  # built on first use: retrieval runs need no LLM key
         self._dataset_metrics: dict = {}
 
@@ -326,16 +337,34 @@ class EvalRunner:
             )
 
         ingestion_ms = 0.0
+        ingestion_wall_ms = 0.0
+        write_interval_start: float | None = None
         ingested_docs_count = 0
         completed = 0
+        total_docs = 0
+        active_writes = 0
+        active_evaluations = 0
 
-        def report(stage: str, advanced: int = 0) -> None:
+        def ingestion_wall_snapshot() -> float | None:
+            if skip_ingestion:
+                return previous.get("ingestion_wall_time_ms")
+            extra = (time.perf_counter() - write_interval_start) * 1000 if write_interval_start is not None else 0.0
+            return round(ingestion_wall_ms + extra, 1)
+
+        def report(advanced: int = 0, *, stage: str | None = None) -> None:
             nonlocal completed
             completed += advanced
-            if self.on_progress is not None:
-                self.on_progress(stage, completed, len(queries))
-
-        report("ingesting")
+            if self.on_progress is None:
+                return
+            ingested_for_run = 0 if skip_ingestion else ingested_docs_count
+            if stage is None:
+                if active_writes and active_evaluations:
+                    stage = "ingesting_and_evaluating"
+                elif active_writes or (not active_evaluations and ingested_for_run < total_docs):
+                    stage = "ingesting"
+                else:
+                    stage = "evaluating"
+            self.on_progress(EvaluationProgress(stage, completed, len(queries), ingested_for_run, total_docs))
 
         if dataset.isolation_unit is not None:
             # Unit-sequential mode: ingest one unit's document then answer all its queries
@@ -352,6 +381,8 @@ class EvalRunner:
                 uid = dataset.get_isolation_id(doc)
                 if uid is not None and uid in queries_by_unit:
                     docs_by_unit.setdefault(uid, []).append(doc)
+            if self.on_documents is not None:
+                self.on_documents(doc for group in docs_by_unit.values() for doc in group)
 
             # A unit is reusable only when every selected question has a saved result.
             prev_by_unit: dict[str, list[QueryResult]] = {}
@@ -373,7 +404,9 @@ class EvalRunner:
                 ingested_docs_count = previous.get("ingested_docs", 0)
             else:
                 pending_units = len(docs_by_unit) - len(prev_by_unit)
+                total_docs = sum(len(docs) for uid, docs in docs_by_unit.items() if uid not in prev_by_unit)
                 console.print(f"[dim]Ingesting {pending_units} units into {memory.name} ({getattr(memory, 'unit_concurrency', 1)} at a time)...[/dim]")
+            report()
 
             async def _run_unit_sequential(progress, task_id):
                 nonlocal ingestion_ms, ingested_docs_count
@@ -396,7 +429,7 @@ class EvalRunner:
                         total_queries=len(done),
                         correct=0,
                         accuracy=None, ingestion_time_ms=round(ingestion_ms, 1),
-                        ingested_docs=ingested_docs_count,
+                        ingested_docs=ingested_docs_count, ingestion_wall_time_ms=ingestion_wall_snapshot(),
                         score_type=dataset.score_type,
                         description=description, answer_llm=mode.llm_id,
                         judge_llm=(None if dataset.task_type in ("coding", "retrieval") else self._get_judge(dataset)._llm.model_id),
@@ -404,20 +437,30 @@ class EvalRunner:
                     ))
 
                 async def run_unit(unit_id, unit_docs):
-                    nonlocal ingestion_ms, ingested_docs_count
+                    nonlocal ingestion_ms, ingestion_wall_ms, write_interval_start
+                    nonlocal ingested_docs_count, active_writes, active_evaluations
                     if unit_id in prev_by_unit:
                         progress.advance(task_id, len(prev_by_unit[unit_id]))
-                        report("evaluating", len(prev_by_unit[unit_id]))
+                        report(len(prev_by_unit[unit_id]))
                         return
                     async with unit_sem:
                         if not skip_ingestion:
-                            report("ingesting")
+                            active_writes += 1
+                            report()
                             t0 = time.perf_counter()
-                            await memory.async_ingest(unit_docs)
-                            ingestion_ms += (time.perf_counter() - t0) * 1000
+                            if write_interval_start is None:
+                                write_interval_start = t0
+                            try:
+                                await memory.async_ingest(unit_docs)
+                            finally:
+                                ended = time.perf_counter()
+                                active_writes -= 1
+                                if not active_writes:
+                                    ingestion_wall_ms += (ended - write_interval_start) * 1000
+                                    write_interval_start = None
+                            ingestion_ms += (ended - t0) * 1000
                             ingested_docs_count += len(unit_docs)
 
-                        report("evaluating")
                         unit_queries = queries_by_unit.get(unit_id, [])
                         unit_results = [None] * len(unit_queries)
 
@@ -425,10 +468,16 @@ class EvalRunner:
                             async with sem:
                                 unit_results[i] = await _process_one(q)
                                 progress.advance(task_id)
-                                report("evaluating", 1)
+                                report(1)
 
-                        await asyncio.gather(*[bounded(i, q) for i, q in enumerate(unit_queries)])
+                        active_evaluations += 1
+                        report()
+                        try:
+                            await asyncio.gather(*[bounded(i, q) for i, q in enumerate(unit_queries)])
+                        finally:
+                            active_evaluations -= 1
                         results_by_unit[unit_id] = unit_results
+                        report()
                     # Save incrementally after each unit to survive crashes
                     _save_partial()
 
@@ -443,6 +492,10 @@ class EvalRunner:
 
         else:
             # Batch mode: ingest all documents upfront, then answer all queries.
+            if self.on_documents is not None:
+                self.on_documents(documents)
+            total_docs = 0 if skip_ingestion else len(documents)
+            report()
             if skip_ingestion:
                 console.print(f"[dim]Skipping ingestion (--skip-ingestion).[/dim]\n")
                 ingestion_ms = previous.get("ingestion_time_ms", 0.0)
@@ -452,11 +505,12 @@ class EvalRunner:
                 t0 = time.perf_counter()
                 memory.ingest(documents)
                 ingestion_ms = (time.perf_counter() - t0) * 1000
+                ingestion_wall_ms = ingestion_ms
                 ingested_docs_count = len(documents)
                 avg = f" ({ingestion_ms / len(documents):.1f}ms/doc avg)" if documents else ""
                 console.print(f"  ingested in {ingestion_ms:.0f}ms{avg}\n")
 
-            report("evaluating")
+            report()
 
             async def _run_all(progress, task_id):
                 concurrency = getattr(memory, "concurrency", _CONCURRENCY)
@@ -467,7 +521,7 @@ class EvalRunner:
                     async with sem:
                         results[i] = await _process_one(q)
                         progress.advance(task_id)
-                        report("evaluating", 1)
+                        report(1)
 
                 await asyncio.gather(*[bounded(i, q) for i, q in enumerate(queries)])
                 return results
@@ -476,6 +530,8 @@ class EvalRunner:
                           TaskProgressColumn(), TimeElapsedColumn(), console=console) as progress:
                 task_id = progress.add_task("Evaluating", total=len(queries))
                 results = asyncio.run(_run_all(progress, task_id))
+
+        report(stage="finalizing")
 
         if show_raw:
             for r in results:
@@ -499,6 +555,7 @@ class EvalRunner:
             accuracy=None,
             ingestion_time_ms=round(ingestion_ms, 1),
             ingested_docs=ingested_docs_count,
+            ingestion_wall_time_ms=ingestion_wall_snapshot(),
             score_type=dataset.score_type,
             description=description,
             answer_llm=mode.llm_id,

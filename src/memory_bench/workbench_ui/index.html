@@ -17,19 +17,41 @@
   <main>
     <div class="intro">
       <h1>记忆评测</h1>
-      <p>选择数据集和记忆后端，运行评测并查看评分、耗时和日志。</p>
+      <p>发起评测，查看每轮结果，并比较不同方案的得分与耗时。</p>
     </div>
     <div class="workspace">
       <section class="panel setup">
         <h2>新建评测</h2>
         <form id="run-form">
-          <label for="dataset">数据集</label>
+          <label for="evaluation-name">评测名称</label>
+          <input id="evaluation-name" type="text" required maxlength="80" placeholder="例如：ContextBase 基线">
+          <label for="dataset">评测类型</label>
           <select id="dataset" name="dataset" required></select>
           <label for="split">数据集分组</label>
           <select id="split" name="split" required></select>
           <label for="backend">记忆后端</label>
           <select id="backend" name="backend" required></select>
           <p class="hint" id="backend-help"></p>
+          <fieldset id="connection-panel" class="connection-panel" hidden>
+            <legend>本轮连接</legend>
+            <label for="connection-url">API 地址</label>
+            <input id="connection-url" type="url" required maxlength="2048" placeholder="https://example.com">
+            <div id="connection-bank-row" hidden>
+              <label for="connection-bank">Bank ID</label>
+              <input id="connection-bank" type="text" maxlength="256" placeholder="已授权的测试 Bank">
+            </div>
+            <label for="connection-key">API Key</label>
+            <input id="connection-key" type="password" maxlength="4096" autocomplete="new-password">
+            <label id="connection-reuse-row" class="check" hidden>
+              <input id="connection-reuse" type="checkbox"> 使用该地址已保存的 Key
+            </label>
+            <div class="connection-actions">
+              <button id="connection-save" type="button" class="secondary">保存为默认连接</button>
+              <button id="connection-clear-default" type="button" class="secondary" hidden>清除默认 Key</button>
+              <button id="connection-reset" type="button" class="secondary" hidden>恢复初始配置</button>
+            </div>
+            <p id="connection-message" class="hint" aria-live="polite" hidden></p>
+          </fieldset>
           <label for="limit">题目数</label>
           <div class="limit-row">
             <input id="limit" name="limit" type="number" min="1" step="1" value="5" required>
@@ -58,17 +80,33 @@
               <div>
                 <h3 id="run-name"></h3>
                 <p id="run-meta" class="hint"></p>
+                <p id="run-target" class="hint run-target" hidden></p>
               </div>
               <button type="button" id="cancel" class="secondary" hidden>停止评测</button>
             </div>
-            <div class="progress-caption"><span id="stage"></span><span id="progress-count"></span></div>
-            <progress id="progress" aria-label="已完成题数" max="1"></progress>
+            <div class="progress-caption"><strong id="stage"></strong><span id="elapsed"></span></div>
+            <progress id="loading-progress" aria-label="加载数据集" hidden></progress>
+            <div id="ingestion-progress-row" class="run-progress-row" hidden>
+              <div class="progress-caption"><span>写入进度</span><span id="ingestion-progress-count"></span></div>
+              <progress id="ingestion-progress" aria-label="已写入文档数" max="1"></progress>
+            </div>
+            <div id="questions-progress-row" class="run-progress-row" hidden>
+              <div class="progress-caption"><span>答题与评分进度</span><span id="progress-count"></span></div>
+              <progress id="progress" aria-label="已处理题数" max="1"></progress>
+            </div>
             <div class="metrics" id="metrics" hidden>
               <div><span id="score-label">准确率</span><strong id="score"></strong></div>
               <div><span>答对 / 总题数</span><strong id="correct"></strong></div>
-              <div><span>写入耗时</span><strong id="ingestion"></strong></div>
+              <div><span id="ingestion-label">写入实际耗时</span><strong id="ingestion"></strong></div>
               <div><span>平均检索延迟</span><strong id="retrieval"></strong></div>
+              <div><span>检索 P95</span><strong id="retrieval-p95"></strong></div>
+              <div><span>写入文档数</span><strong id="ingested-docs"></strong></div>
             </div>
+            <figure id="distribution" class="chart" hidden>
+              <figcaption>答题分布</figcaption>
+              <div id="distribution-bars"></div>
+              <p id="distribution-note" class="hint" hidden>BEAM 单题得分 ≥ 0.5 计为答对。</p>
+            </figure>
             <div class="result-links">
               <a id="download" hidden>下载结果 JSON</a>
               <p id="run-error" class="error" role="alert" hidden></p>
@@ -81,9 +119,24 @@
         </section>
 
         <section class="panel history">
-          <div class="section-head"><h2>运行历史</h2></div>
+          <div class="section-head"><h2>运行历史</h2><span id="compare-count" class="hint"></span></div>
+          <p class="hint">勾选 2 至 4 轮查看指标对比。<a id="compare-jump" href="#comparison" hidden>查看对比</a></p>
           <p class="empty compact" id="history-empty">暂无运行记录。</p>
           <ul id="history"></ul>
+          <div class="history-nav">
+            <button id="history-prev" type="button" class="secondary" hidden>上一页</button>
+            <button id="history-next" type="button" class="secondary" hidden>下一页</button>
+          </div>
+        </section>
+
+        <section class="panel comparison" id="comparison" hidden>
+          <div class="section-head">
+            <h2>评测对比</h2>
+            <button id="compare-clear" type="button" class="secondary">清除选择</button>
+          </div>
+          <p id="compare-message" class="hint" aria-live="polite"></p>
+          <ul id="compare-meta" class="compare-meta"></ul>
+          <div id="compare-charts" class="compare-charts"></div>
         </section>
       </div>
     </div>

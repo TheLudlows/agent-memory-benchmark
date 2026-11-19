@@ -1,14 +1,25 @@
 const $ = (id) => document.getElementById(id);
 const names = { locomo: "LoCoMo", beam: "BEAM", longmemeval: "LongMemEval" };
 const statuses = { running: "运行中", cancelling: "停止中", completed: "已完成", scoring_incomplete: "评分未完成", failed: "失败", cancelled: "已停止", interrupted: "已中断" };
-const stages = { loading: "加载数据集", ingesting: "写入记忆", evaluating: "检索、回答与评分" };
+const stages = {
+  loading: "加载数据集", ingesting: "写入记忆", evaluating: "检索、回答与评分",
+  ingesting_and_evaluating: "同时写入和答题", finalizing: "整理评测结果",
+};
 const isActive = (job) => job && ["running", "cancelling"].includes(job.status);
 const formatDate = (value) => new Date(value).toLocaleString("zh-CN", { hour12: false });
 
+const pageSize = 12;
+const compareLimit = 4;
+const compareIds = new Set();
+let comparisonVersion = 0;
 let settings;
 let selected;
 let jobs = [];
+let historyOffset = 0;
+let hasNextPage = false;
+let activeJob = false;
 let submitting = false;
+let savingConnection = false;
 
 async function api(path, options) {
   const response = await fetch(`/api${path}`, options);
@@ -34,18 +45,87 @@ function updateSplits() {
   updateForm();
 }
 
+function loadConnection() {
+  const backend = $("backend").value;
+  const config = settings.backends[backend];
+  $("connection-panel").hidden = false;
+  $("connection-url").value = config.api_url;
+  $("connection-bank-row").hidden = backend !== "contextbase";
+  $("connection-bank").placeholder = config.has_bank_mapping ? "使用已有 Bank 映射" : "已授权的测试 Bank";
+  $("connection-bank").value = config.bank_id;
+  $("connection-reset").hidden = !config.saved;
+  $("connection-clear-default").hidden = !config.key_optional || !config.has_key;
+  clearRunKey();
+  setError("connection-message", "");
+  updateForm();
+}
+
+function clearRunKey() {
+  $("connection-key").value = "";
+  $("connection-reuse").checked = false;
+}
+
+function connectionInput() {
+  return {
+    api_url: $("connection-url").value.trim(),
+    bank_id: $("backend").value === "contextbase" ? $("connection-bank").value.trim() : "",
+    api_key: $("connection-key").value.trim() || null,
+  };
+}
+
+async function saveConnection(action = "save") {
+  const reset = action === "reset";
+  const clear = action === "clear";
+  if (savingConnection) return;
+  const backend = $("backend").value;
+  const data = connectionInput();
+  if (clear) {
+    data.api_key = null;
+    data.clear_key = true;
+  }
+  savingConnection = true;
+  updateForm();
+  const send = reset ? {} : { headers: {"Content-Type": "application/json"}, body: JSON.stringify(data) };
+  try {
+    settings.backends[backend] = await api(`/connections/${backend}${reset ? "/reset" : ""}`, { method: "POST", ...send });
+    loadConnection();
+    setError("connection-message", reset ? "已恢复初始配置。" :
+      clear ? "已清除默认 Key。" : "已保存为默认连接。本轮仍可单独填写。");
+  } catch (error) {
+    setError("connection-message", error.message);
+  } finally {
+    savingConnection = false;
+    updateForm();
+  }
+}
+
 function updateForm() {
   if (!settings) return;
-  const { missing } = settings.backends[$("backend").value];
+  const backend = $("backend").value;
+  const config = settings.backends[backend];
+  const connection = connectionInput();
   const descriptions = {
     "contextbase": "使用预先授权的测试 Bank。",
-    "mem0-cloud": "使用 Mem0 托管 API。",
+    "mem0-cloud": "使用 Mem0 Cloud 兼容 API。",
     "hindsight-http": "连接已启动的 Hindsight API。",
   };
-  $("backend-help").textContent = descriptions[$("backend").value];
-  const missingKeys = [...missing, ...settings.missing_models];
+  $("backend-help").textContent = descriptions[backend];
+  const sameUrl = connection.api_url.replace(/\/+$/, "") === config.api_url;
+  const canReuseKey = sameUrl && config.has_key;
+  if (!canReuseKey) $("connection-reuse").checked = false;
+  $("connection-reuse-row").hidden = !canReuseKey;
+  $("connection-key").placeholder = config.key_optional ? "选填" : "请输入本轮 API Key";
+  const usingSaved = $("connection-reuse").checked;
   const splitError = settings.split_errors?.[$("dataset").value]?.[$("split").value];
-  setError("config-error", splitError || (missingKeys.length ? `请在 .env 配置 ${missingKeys.join("、")}` : ""));
+  const modelError = settings.missing_models.length ? `请在 .env 配置 ${settings.missing_models.join("、")}` : "";
+  const ready = $("evaluation-name").value.trim() && connection.api_url &&
+    (config.key_optional || connection.api_key || usingSaved) &&
+    (backend !== "contextbase" || connection.bank_id || (sameUrl && config.has_bank_mapping));
+  setError("config-error", splitError || modelError);
+  for (const id of ["backend", "connection-url", "connection-bank", "connection-reuse", "connection-save", "connection-reset", "connection-clear-default"]) {
+    $(id).disabled = savingConnection || submitting;
+  }
+  $("connection-key").disabled = savingConnection || submitting || usingSaved;
   for (const role of ["answer", "judge"]) {
     const { provider, model } = settings.models[role];
     const fallback = provider === "gemini" && role === "judge" && $("dataset").value === "beam"
@@ -53,19 +133,138 @@ function updateForm() {
     $(`${role}-model`).textContent = `${provider} · ${model || fallback}`;
   }
   $("limit").disabled = $("full").checked;
-  $("start").disabled = submitting || jobs.some(isActive) || Boolean(splitError) || missingKeys.length > 0;
-  $("start").textContent = submitting ? "正在启动…" : jobs.some(isActive) ? "已有评测运行中" : "开始评测";
+  $("start").disabled = submitting || savingConnection || activeJob || !ready || Boolean(splitError || modelError);
+  $("start").textContent = submitting ? "正在启动…" : activeJob ? "已有评测运行中" : "开始评测";
+}
+
+function runType(job) {
+  const { dataset, split, backend } = job.selection;
+  return `${names[dataset]} · ${split} · ${settings.backends[backend].label}`;
 }
 
 function title(job) {
-  const { dataset, split, backend } = job.selection;
-  return `${names[dataset]} · ${split} · ${settings.backends[backend].label}`;
+  return job.name || runType(job);
+}
+
+const number = (value, unit = "") => value == null ? "—" : `${value.toFixed(1)}${unit}`;
+const scoreText = (score) => score == null ? "—" : number(score * 100, "%");
+const seconds = (ms) => ms == null ? "—" : number(ms / 1000, " s");
+
+function bars(container, rows, maximum, format) {
+  container.replaceChildren(...rows.map(([label, value]) => {
+    const row = document.createElement("div");
+    row.className = "chart-row";
+    const name = document.createElement("span");
+    name.textContent = label;
+    const bar = document.createElement(value == null ? "span" : "meter");
+    if (value != null) {
+      bar.min = 0;
+      bar.max = maximum;
+      bar.value = value;
+      bar.setAttribute("aria-label", label);
+    }
+    const text = document.createElement("span");
+    text.textContent = format(value);
+    row.append(name, bar, text);
+    return row;
+  }));
+}
+
+function comparisonWarning(runs) {
+  const differs = (values) => new Set(values.filter((value) => value != null && value !== "")).size > 1;
+  const questions = runs.map((run) => run.summary.question_fingerprint);
+  const documents = runs.map((run) => run.summary.document_fingerprint);
+  const answerModels = runs.map((run) => run.summary.answer_llm);
+  const judgeModels = runs.map((run) => run.summary.judge_llm);
+  const selectionDiffers = ["dataset", "split"].some((key) => differs(runs.map((run) => run.selection[key])));
+  const mismatches = [];
+  if (selectionDiffers || differs(questions) || differs(runs.map((run) => run.summary.total_queries))) {
+    mismatches.push("题目");
+  }
+  if (differs(documents)) mismatches.push("写入资料");
+  if (differs(answerModels)) mismatches.push("回答模型");
+  if (differs(judgeModels)) mismatches.push("评分模型");
+  const missing = [questions, documents, answerModels, judgeModels].some((values) => values.some((value) => !value));
+  const unknown = "部分评测缺少题目、写入资料或模型信息，无法确认这些评测的口径。";
+  if (mismatches.length) {
+    return `${mismatches.join("、")}不同，分数不可直接比较。` + (missing ? unknown : "");
+  }
+  return missing ? unknown : "题目、写入资料、回答模型和评分模型一致。";
+}
+
+const wallWriteTime = (summary) => summary.ingestion_wall_time_ms;
+const legacyWriteTime = (summary) => wallWriteTime(summary) == null ? summary.ingestion_time_ms : null;
+
+async function drawComparison() {
+  const version = ++comparisonVersion;
+  const ids = [...compareIds];
+  $("comparison").hidden = ids.length === 0;
+  $("compare-jump").hidden = ids.length < 2;
+  $("compare-count").textContent = ids.length ? `已选 ${ids.length} / ${compareLimit}` : "";
+  $("compare-meta").replaceChildren();
+  $("compare-charts").replaceChildren();
+  if (ids.length < 2) {
+    $("compare-message").textContent = "请再选择一轮评测。";
+    return;
+  }
+  $("compare-message").textContent = "正在读取指标…";
+  try {
+    const runs = await Promise.all(ids.map((id) => api(`/runs/${id}/metrics`)));
+    if (version !== comparisonVersion) return;
+    $("compare-message").textContent = comparisonWarning(runs);
+    for (const [i, run] of runs.entries()) {
+      const item = document.createElement("li");
+      const count = run.summary.total_queries;
+      item.textContent = `${i + 1}. ${title(run)} · ${runType(run)} · ${count ?? "—"} 题` +
+        ` · 回答 ${run.summary.answer_llm || "—"} · 评分 ${run.summary.judge_llm || "—"}` +
+        (run.summary.scoring_failed_queries ? ` · 评分失败 ${run.summary.scoring_failed_queries} 题` : "");
+      $("compare-meta").append(item);
+    }
+    const metrics = [
+      [runs.every((run) => run.selection.dataset === "beam") ? "平均得分" : "得分 / 准确率",
+        (s) => s.score, scoreText, 1],
+      ["平均检索延迟", (s) => s.avg_retrieve_time_ms, (value) => number(value, " ms")],
+      ["检索 P95", (s) => s.p95_retrieve_time_ms, (value) => number(value, " ms")],
+    ];
+    if (runs.some((run) => wallWriteTime(run.summary) != null)) {
+      metrics.push(["写入实际耗时", wallWriteTime, seconds]);
+    }
+    if (runs.some((run) => legacyWriteTime(run.summary) != null)) {
+      metrics.push(["累计写入耗时（旧口径）", legacyWriteTime, seconds]);
+    }
+    for (const [label, metric, format, max] of metrics) {
+      const figure = document.createElement("figure");
+      figure.className = "chart";
+      const caption = document.createElement("figcaption");
+      caption.textContent = label;
+      const content = document.createElement("div");
+      const rows = runs.map((run, i) => [`${i + 1}. ${title(run)}`, metric(run.summary)]);
+      bars(content, rows, max ?? Math.max(1, ...rows.map(([, value]) => value ?? 0)), format);
+      figure.append(caption, content);
+      $("compare-charts").append(figure);
+    }
+  } catch (error) {
+    if (version === comparisonVersion) $("compare-message").textContent = error.message;
+  }
 }
 
 function drawHistory() {
   $("history-empty").hidden = jobs.length > 0;
   $("history").replaceChildren(...jobs.map((job) => {
     const row = document.createElement("li");
+    row.className = "history-entry";
+    const compare = document.createElement("input");
+    compare.type = "checkbox";
+    compare.checked = compareIds.has(job.id);
+    compare.disabled = !["completed", "scoring_incomplete"].includes(job.status) ||
+      (!compare.checked && compareIds.size >= compareLimit);
+    compare.setAttribute("aria-label", `对比 ${title(job)}`);
+    compare.addEventListener("change", () => {
+      if (compare.checked) compareIds.add(job.id);
+      else compareIds.delete(job.id);
+      drawHistory();
+      drawComparison();
+    });
     const button = document.createElement("button");
     button.type = "button";
     button.className = "history-row";
@@ -73,7 +272,7 @@ function drawHistory() {
     const text = document.createElement("span");
     text.textContent = title(job);
     const note = document.createElement("small");
-    note.textContent = `${formatDate(job.started_at)} · ${job.selection.query_limit ?? "全量"}${job.selection.query_limit ? " 题" : ""}`;
+    note.textContent = `${runType(job)} · ${formatDate(job.started_at)}`;
     text.append(note);
     const status = document.createElement("span");
     status.className = "status";
@@ -85,9 +284,35 @@ function drawHistory() {
       drawHistory();
       loadDetail(job.id).catch((error) => setError("run-error", error.message));
     });
-    row.append(button);
+    row.append(compare, button);
     return row;
   }));
+}
+
+function renderProgress(row, bar, counter, completed, total, unit) {
+  $(row).hidden = !(total > 0);
+  if ($(row).hidden) return;
+  const done = completed ?? 0;
+  $(bar).max = total;
+  $(bar).value = done;
+  $(counter).textContent = `${done} / ${total} ${unit}（${Math.floor(done * 100 / total)}%）`;
+}
+
+function renderRunProgress(job) {
+  const { stage, completed, total, ingested_docs, total_docs } = job.progress;
+  const active = isActive(job);
+  $("stage").textContent = job.status === "cancelling" ? statuses.cancelling :
+    active ? (stages[stage] || "准备评测") : statuses[job.status];
+  $("loading-progress").hidden = !(active && (!stage || stage === "loading"));
+  renderProgress("ingestion-progress-row", "ingestion-progress", "ingestion-progress-count",
+    ingested_docs, total_docs, "份文档");
+  renderProgress("questions-progress-row", "progress", "progress-count", completed, total, "题");
+
+  const finish = active ? Date.now() : Date.parse(job.ended_at);
+  const elapsed = Math.max(0, Math.floor((finish - Date.parse(job.started_at)) / 1000));
+  const minutes = Math.floor(elapsed / 60);
+  $("elapsed").textContent = Number.isFinite(elapsed)
+    ? `已用时 ${minutes ? `${minutes} 分 ` : ""}${elapsed % 60} 秒` : "";
 }
 
 async function loadDetail(id) {
@@ -97,29 +322,36 @@ async function loadDetail(id) {
   $("run-detail").hidden = false;
   $("run-name").textContent = title(job);
   const modelLabel = (role) => job.summary[`${role}_llm`] || job.models[role].model || job.models[role].provider;
-  $("run-meta").textContent = `${formatDate(job.started_at)} · 回答 ${modelLabel("answer")} · 评分 ${modelLabel("judge")}`;
+  $("run-meta").textContent = `${runType(job)} · ${formatDate(job.started_at)} · 回答 ${modelLabel("answer")} · 评分 ${modelLabel("judge")}`;
+  const target = job.target;
+  $("run-target").hidden = !target?.api_url;
+  $("run-target").textContent = target?.api_url
+    ? `${target.api_url}${target.bank_id ? ` · Bank ${target.bank_id}` : ""}` : "";
   $("status").textContent = statuses[job.status];
   $("status").dataset.status = job.status;
   $("status").hidden = false;
   $("cancel").hidden = !isActive(job);
   $("cancel").disabled = job.status === "cancelling";
-  const { stage, total, completed } = job.progress;
-  $("stage").textContent = isActive(job) ? (stages[stage] || "准备评测") : statuses[job.status];
-  $("progress-count").textContent = total ? `${completed} / ${total} 题` : "";
-  $("progress").max = total || 1;
-  if (total || !isActive(job)) $("progress").value = completed || 0;
-  else $("progress").removeAttribute("value");
-  $("progress").hidden = !isActive(job) && !total;
+  renderRunProgress(job);
 
   const s = job.summary;
   $("metrics").hidden = !s.total_queries;
   if (s.total_queries) {
     $("score-label").textContent = job.selection.dataset === "beam" ? "平均得分" : "准确率";
-    $("score").textContent = s.score == null ? "—" : `${(s.score * 100).toFixed(1)}%`;
+    $("score").textContent = scoreText(s.score);
     $("correct").textContent = s.scoring_failed_queries ? "—" : `${s.correct} / ${s.total_queries}`;
-    $("ingestion").textContent = `${(s.ingestion_time_ms / 1000).toFixed(1)} s`;
-    $("retrieval").textContent = s.avg_retrieve_time_ms == null ? "—" : `${s.avg_retrieve_time_ms.toFixed(1)} ms`;
+    $("ingestion-label").textContent = wallWriteTime(s) == null ? "累计写入耗时（旧口径）" : "写入实际耗时";
+    $("ingestion").textContent = seconds(wallWriteTime(s) ?? legacyWriteTime(s));
+    $("retrieval").textContent = number(s.avg_retrieve_time_ms, " ms");
+    $("retrieval-p95").textContent = number(s.p95_retrieve_time_ms, " ms");
+    $("ingested-docs").textContent = s.ingested_docs ?? "—";
+    const failed = s.scoring_failed_queries ?? 0;
+    bars($("distribution-bars"), [
+      ["答对", s.correct], ["未达标", s.total_queries - s.correct - failed], ["评分失败", failed],
+    ], s.total_queries, (value) => `${value} 题`);
   }
+  $("distribution").hidden = !s.total_queries;
+  $("distribution-note").hidden = job.selection.dataset !== "beam";
   $("download").hidden = !job.result_available;
   $("download").href = `/api/runs/${id}/result`;
   $("download").textContent = job.status === "completed" ? "下载结果 JSON" : "下载已保存的部分结果";
@@ -132,14 +364,29 @@ async function loadDetail(id) {
 }
 
 async function refresh() {
-  const updated = await api("/runs");
+  const offset = historyOffset;
+  const [page, newest] = await Promise.all([
+    api(`/runs?limit=${pageSize + 1}&offset=${offset}`),
+    offset ? api("/runs?limit=1") : Promise.resolve(null),
+  ]);
+  if (offset !== historyOffset) return;
+  activeJob = isActive((newest || page)[0]);
+  hasNextPage = page.length > pageSize;
+  const updated = page.slice(0, pageSize);
   if (!selected && updated.length) selected = updated[0].id;
   if (JSON.stringify(jobs) !== JSON.stringify(updated)) {
     jobs = updated;
     drawHistory();
   }
+  $("history-prev").hidden = offset === 0;
+  $("history-next").hidden = !hasNextPage;
   updateForm();
   if (selected) await loadDetail(selected);
+}
+
+function changePage(offset) {
+  historyOffset = offset;
+  refresh().catch((error) => setError("form-error", error.message));
 }
 
 async function poll() {
@@ -154,7 +401,9 @@ async function poll() {
 
 $("run-form").addEventListener("submit", async (event) => {
   event.preventDefault();
+  if ($("start").disabled) return;
   setError("form-error", "");
+  const connection = { ...connectionInput(), use_saved_key: $("connection-reuse").checked };
   submitting = true;
   updateForm();
   try {
@@ -162,6 +411,8 @@ $("run-form").addEventListener("submit", async (event) => {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
+        name: $("evaluation-name").value.trim(),
+        connection,
         dataset: $("dataset").value,
         split: $("split").value,
         backend: $("backend").value,
@@ -169,6 +420,9 @@ $("run-form").addEventListener("submit", async (event) => {
       }),
     });
     selected = job.id;
+    historyOffset = 0;
+    $("evaluation-name").value = "";
+    clearRunKey();
     await refresh();
   } catch (error) {
     setError("form-error", error.message);
@@ -190,7 +444,24 @@ $("cancel").addEventListener("click", async () => {
 
 $("dataset").addEventListener("change", updateSplits);
 $("split").addEventListener("change", updateForm);
-$("backend").addEventListener("change", updateForm);
+$("backend").addEventListener("change", loadConnection);
+for (const id of ["evaluation-name", "connection-url", "connection-bank", "connection-key", "connection-reuse"]) {
+  $(id).addEventListener("input", () => {
+    if (id === "connection-reuse" && $("connection-reuse").checked) $("connection-key").value = "";
+    setError("connection-message", "");
+    updateForm();
+  });
+}
+$("history-prev").addEventListener("click", () => changePage(Math.max(0, historyOffset - pageSize)));
+$("history-next").addEventListener("click", () => changePage(historyOffset + pageSize));
+$("compare-clear").addEventListener("click", () => {
+  compareIds.clear();
+  drawHistory();
+  drawComparison();
+});
+$("connection-save").addEventListener("click", () => saveConnection());
+$("connection-reset").addEventListener("click", () => saveConnection("reset"));
+$("connection-clear-default").addEventListener("click", () => saveConnection("clear"));
 $("full").addEventListener("change", updateForm);
 
 async function init() {
@@ -198,6 +469,7 @@ async function init() {
     settings = await api("/config");
     options("dataset", Object.keys(settings.datasets).map((key) => [key, names[key]]));
     options("backend", Object.entries(settings.backends).map(([key, value]) => [key, value.label]));
+    loadConnection();
     updateSplits();
     await poll();
   } catch (error) {

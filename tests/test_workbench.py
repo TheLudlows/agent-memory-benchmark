@@ -1,10 +1,12 @@
 import asyncio
+import io
 import json
 import threading
 import time
 from dataclasses import asdict
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from zipfile import ZipFile
 
 import pytest
 from fastapi.testclient import TestClient
@@ -14,10 +16,17 @@ from memory_bench.judge import ScoringError
 from memory_bench.memory.base import MemoryProvider
 from memory_bench.memory.hindsight import HindsightHTTPMemoryProvider
 from memory_bench.memory.mem0_cloud import Mem0CloudMemoryProvider
-from memory_bench.models import Document, QueryResult
+from memory_bench.models import AnswerResult, Document, QueryResult
 from memory_bench.modes.rag import RAGMode
-from memory_bench.runner import EvalRunner
+from memory_bench.runner import EvaluationProgress, EvalRunner
 from memory_bench.workbench import create_app
+
+
+@pytest.fixture(autouse=True)
+def private_workbench_config(monkeypatch, tmp_path):
+    directory = tmp_path / "private-config"
+    monkeypatch.setenv("AMB_WORKBENCH_CONFIG_DIR", str(directory))
+    return directory
 
 
 @pytest.fixture
@@ -55,6 +64,9 @@ def mock_services():
                     values["score"] = 0.0
                 self.send_json({"choices": [{"message": {"content": json.dumps({key: values[key] for key in schema})}}]})
             elif self.path.endswith("/memories"):
+                if self.headers.get("Authorization") != "Bearer test-bearer-value" or "/banks/ui-bank/" not in self.path:
+                    self.send_json({"error": "Incorrect Workbench backend configuration"}, status=403)
+                    return
                 self.send_json({"success": True, "async": True, "items_count": len(body["items"]), "operation_id": "test-op"})
             elif self.path.endswith("/memories/recall"):
                 empty_queries = {"No memory?", "What did they say about pets?", "What is their salary?"}
@@ -79,9 +91,6 @@ def mock_services():
 def test_datasets_run_through_local_api_and_worker(monkeypatch, tmp_path, mock_services):
     endpoint, calls = mock_services
     options = {
-        "CONTEXTBASE_API_URL": endpoint,
-        "CONTEXTBASE_API_TOKEN": "test-bearer-value",
-        "CONTEXTBASE_BANK_ID": "bench-bank",
         "OPENAI_API_KEY": "test-model-key",
         "OPENAI_BASE_URL": endpoint + "/v1",
         "OMB_ANSWER_LLM": "openai",
@@ -91,7 +100,8 @@ def test_datasets_run_through_local_api_and_worker(monkeypatch, tmp_path, mock_s
     }
     for key, value in options.items():
         monkeypatch.setenv(key, value)
-    monkeypatch.delenv("CONTEXTBASE_BENCH_BANKS", raising=False)
+    for name in ("CONTEXTBASE_API_URL", "CONTEXTBASE_API_TOKEN", "CONTEXTBASE_BANK_ID", "CONTEXTBASE_BENCH_BANKS"):
+        monkeypatch.delenv(name, raising=False)
     for name in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy"):
         monkeypatch.delenv(name, raising=False)
     monkeypatch.setenv("PYTHONPATH", str(Path(__file__).resolve().parents[1] / "src"))
@@ -144,14 +154,26 @@ def test_datasets_run_through_local_api_and_worker(monkeypatch, tmp_path, mock_s
         config = client.get("/api/config").json()
         assert set(config["datasets"]) == {case[0] for case in fixtures}
         assert set(config["backends"]) == {"contextbase", "mem0-cloud", "hindsight-http"}
-        assert options["CONTEXTBASE_API_TOKEN"] not in json.dumps(config)
+        assert config["backends"]["contextbase"]["missing"] == ["API 地址", "API Key", "Bank ID"]
+        response = client.post("/api/connections/contextbase", json={
+            "api_url": endpoint + "/default", "api_key": "default-key", "bank_id": "default-bank",
+        })
+        assert response.status_code == 200, response.text
+        assert response.json()["missing"] == []
+        assert "default-key" not in response.text
 
+        connection = {"api_url": endpoint, "api_key": "test-bearer-value", "bank_id": "ui-bank"}
+        saved_fingerprints = {}
+        document_fingerprints = {}
         for dataset, split, variable, data in fixtures:
             dataset_path = tmp_path / f"{dataset}.json"
             dataset_path.write_text(json.dumps([data]))
             monkeypatch.setenv(variable, str(dataset_path))
             question_count = 4 if dataset == "beam" else 1
-            selection = {"dataset": dataset, "split": split, "backend": "contextbase", "query_limit": question_count}
+            selection = {
+                "name": f"{dataset} baseline", "dataset": dataset, "split": split,
+                "backend": "contextbase", "query_limit": question_count, "connection": connection,
+            }
             assert client.post("/api/runs", json={**selection, "split": "../invalid"}).status_code == 422
             assert client.post("/api/runs", json=selection, headers={"Origin": "https://elsewhere.test"}).status_code == 403
             response = client.post("/api/runs", json=selection)
@@ -159,11 +181,25 @@ def test_datasets_run_through_local_api_and_worker(monkeypatch, tmp_path, mock_s
             assert client.post("/api/runs", json=selection).status_code == 409
             detail_url, detail = await_result(client, response)
             assert detail["status"] == "completed", detail["log"]
-            assert detail["progress"] == {"stage": "evaluating", "completed": question_count, "total": question_count}
+            document_count = 2 if dataset == "longmemeval" else 1
+            assert detail["progress"] == {
+                "stage": "finalizing", "completed": question_count, "total": question_count,
+                "ingested_docs": document_count, "total_docs": document_count,
+            }
             assert detail["summary"]["score"] == (0.5 if dataset == "beam" else 1.0)
             assert detail["summary"]["judge_llm"] == "openai:judge-stub"
             assert detail["summary"]["ingested_docs"] == (2 if dataset == "longmemeval" else 1)
             assert detail["result_available"]
+            assert detail["name"] == selection["name"]
+            assert detail["target"] == {"api_url": endpoint, "bank_id": "ui-bank"}
+            metrics = client.get(detail_url + "/metrics").json()
+            assert metrics["summary"] == detail["summary"] and "log" not in metrics
+            assert metrics["summary"]["p95_retrieve_time_ms"] >= 0
+            saved_fingerprints[dataset] = metrics["summary"]["question_fingerprint"]
+            document_fingerprints[dataset] = metrics["summary"]["document_fingerprint"]
+            assert metrics["summary"]["ingestion_wall_time_ms"] == metrics["summary"]["ingestion_time_ms"]
+            assert "test-bearer-value" not in json.dumps(detail)
+            assert "test-bearer-value" not in json.dumps(metrics)
             result = client.get(detail_url + "/result")
             assert "attachment" in result.headers["Content-Disposition"]
             rows = result.json()["results"]
@@ -183,13 +219,22 @@ def test_datasets_run_through_local_api_and_worker(monkeypatch, tmp_path, mock_s
         assert len({item["document_id"] for item in ingests[-1]["items"]}) == 2
         assert len(client.get("/api/runs").json()) == len(fixtures)
 
+        beam_path = tmp_path / "beam.json"
+        beam_rows = json.loads(beam_path.read_text())
+        beam_rows[0]["chat"][0][0]["content"] = "The input conversation now says London."
+        beam_path.write_text(json.dumps(beam_rows))
         monkeypatch.setenv("OMB_JUDGE_MODEL", "judge-fail")
         detail_url, detail = await_result(client, client.post("/api/runs", json={
+            "name": "BEAM scoring offline", "connection": connection,
             "dataset": "beam", "split": "100k", "backend": "contextbase", "query_limit": 4,
         }))
         assert detail["status"] == "scoring_incomplete", detail["log"]
         assert detail["summary"]["scoring_failed_queries"] == 3
         assert detail["summary"]["score"] is None
+        assert detail["summary"]["question_fingerprint"] == saved_fingerprints["beam"]
+        assert detail["summary"]["document_fingerprint"] != document_fingerprints["beam"]
+        assert len(set(saved_fingerprints.values())) == len(fixtures)
+        assert client.get("/api/config").json()["backends"]["contextbase"]["api_url"] == endpoint + "/default"
         result = client.get(detail_url + "/result").json()
         assert result["accuracy"] is None and result["scoring_failed_queries"] == 3
         rows = result["results"]
@@ -197,6 +242,7 @@ def test_datasets_run_through_local_api_and_worker(monkeypatch, tmp_path, mock_s
         assert rows[2]["answer"] == "Paris"
 
         response = client.post("/api/runs", json={
+            "name": "Cancel test", "connection": connection,
             "dataset": "locomo", "split": "locomo10", "backend": "contextbase", "query_limit": 1,
         })
         assert response.status_code == 201
@@ -211,6 +257,10 @@ def test_datasets_run_through_local_api_and_worker(monkeypatch, tmp_path, mock_s
         history = restarted.get("/api/runs").json()
         assert len(history) == len(fixtures) + 2
         assert [job["status"] for job in history[:2]] == ["cancelled", "scoring_incomplete"]
+        assert restarted.get("/api/runs?limit=1&offset=1").json() == [history[1]]
+        assert history[0]["name"] == "Cancel test"
+        old_metrics = restarted.get(f"/api/runs/{history[-1]['id']}/metrics").json()
+        assert old_metrics["summary"]["question_fingerprint"] == saved_fingerprints["locomo"]
 
 
 def test_workbench_hindsight_and_mem0_use_fresh_namespaces(monkeypatch, tmp_path):
@@ -258,6 +308,7 @@ def test_beam_workbench_requires_a_split_for_legacy_local_data(monkeypatch, tmp_
         errors = client.get("/api/config").json()["split_errors"]["beam"]
         assert set(errors) == {"100k", "500k", "1m"}
         response = client.post("/api/runs", json={
+            "name": "BEAM local", "connection": {"api_url": "https://example.test"},
             "dataset": "beam", "split": "500k", "backend": "contextbase", "query_limit": 5,
         })
         assert response.status_code == 422 and "BEAM_DATA_SPLIT" in response.json()["detail"]
@@ -287,7 +338,8 @@ def test_beam_rejects_an_invalid_judge_score(payload):
 @pytest.mark.parametrize("replace_on", ["http.response.start", "http.response.body"])
 def test_result_download_during_checkpoint_replacement(tmp_path, replace_on):
     run_id = "0" * 32
-    directory = tmp_path / run_id
+    results = tmp_path / "runs"
+    directory = results / run_id
     path = directory / "results/beam" / f"web-{run_id}" / "rag/100k.json"
     path.parent.mkdir(parents=True)
     (directory / "run.json").write_text(json.dumps({
@@ -297,7 +349,7 @@ def test_result_download_during_checkpoint_replacement(tmp_path, replace_on):
     old = json.dumps({"answer": "a" * 70_000}).encode()
     new = json.dumps({"answer": "b" * 80_000}).encode()
     path.write_bytes(old)
-    app = create_app(tmp_path)
+    app = create_app(results)
     endpoint = next(route.endpoint for route in app.routes if route.path == "/api/runs/{run_id}/result")
 
     async def download():
@@ -372,3 +424,189 @@ def test_beam_can_rejudge_a_legacy_empty_context_abstention(monkeypatch, tmp_pat
     assert summary.accuracy == 1.0
     assert summary.scoring_failed_queries == 0
     assert summary.results[0].correct
+
+
+def test_workbench_connections_can_be_saved_and_reset(monkeypatch, tmp_path, private_workbench_config):
+    monkeypatch.setenv("HINDSIGHT_HTTP_URL", "http://127.0.0.1:8888/")
+    monkeypatch.setenv("HINDSIGHT_HTTP_KEY", "environment-secret")
+    monkeypatch.delenv("MEM0_CLOUD_KEY", raising=False)
+    monkeypatch.delenv("MEM0_API_KEY", raising=False)
+    monkeypatch.delenv("MEM0_CLOUD_URL", raising=False)
+    directory = tmp_path / "runs"
+
+    with TestClient(create_app(directory), base_url="http://127.0.0.1") as client:
+        config = client.get("/api/config")
+        assert "environment-secret" not in config.text
+        assert config.json()["backends"]["hindsight-http"]["has_key"]
+        assert config.json()["backends"]["mem0-cloud"]["api_url"] == "https://api.mem0.ai"
+
+        config_path = "/api/connections/hindsight-http"
+        changed_url = {"api_url": "http://127.0.0.1:9250"}
+        assert client.post(config_path, json=changed_url).status_code == 422
+        response = client.post(config_path, json={**changed_url, "clear_key": True})
+        assert response.status_code == 200
+        assert response.json()["has_key"] is False
+        response = client.post(config_path, json={**changed_url, "api_key": "new-hindsight-secret"})
+        assert response.status_code == 200 and response.json()["has_key"]
+        assert "new-hindsight-secret" not in response.text
+
+        mem0_path = "/api/connections/mem0-cloud"
+        mem0 = {"api_url": "https://example.test/mem0", "api_key": "mem0-private-token"}
+        blocked = client.post(mem0_path, json=mem0, headers={"Origin": "https://elsewhere.example"})
+        assert blocked.status_code == 403
+        invalid = client.post(mem0_path, json={**mem0, "api_key": {"secret": mem0["api_key"]}})
+        assert invalid.status_code == 422 and mem0["api_key"] not in invalid.text
+        invalid = client.post(mem0_path, json={**mem0, "api_url": "https://example.test/?key=key-in-url"})
+        assert invalid.status_code == 422 and "key-in-url" not in invalid.text
+        saved = client.post(mem0_path, json=mem0)
+        assert saved.status_code == 200 and saved.json()["has_key"]
+        assert mem0["api_key"] not in saved.text
+
+    with TestClient(create_app(directory), base_url="http://127.0.0.1") as client:
+        backends = client.get("/api/config").json()["backends"]
+        assert backends["mem0-cloud"]["api_url"] == "https://example.test/mem0"
+        assert backends["mem0-cloud"]["has_key"]
+        assert backends["hindsight-http"]["api_url"] == "http://127.0.0.1:9250"
+        reset = client.post(config_path + "/reset").json()
+        assert reset["api_url"] == "http://127.0.0.1:8888" and not reset["saved"]
+        assert reset["has_key"]
+        storage, = private_workbench_config.glob("*/connections.json")
+        assert "new-hindsight-secret" not in storage.read_text(encoding="utf-8")
+        assert not (directory / ".connections.json").exists()
+
+
+def test_mem0_client_uses_configured_host(monkeypatch):
+    import mem0
+
+    monkeypatch.setenv("MEM0_CLOUD_URL", "https://example.test/mem0")
+    monkeypatch.setenv("MEM0_CLOUD_KEY", "test-api-key")
+    calls = []
+    monkeypatch.setattr(mem0, "MemoryClient", lambda **kwargs: calls.append(kwargs))
+    Mem0CloudMemoryProvider()._ensure_client()
+    assert calls == [{"api_key": "test-api-key", "host": "https://example.test/mem0"}]
+
+
+def test_workbench_requires_per_run_details_and_never_echoes_key(monkeypatch, tmp_path):
+    monkeypatch.setenv("CONTEXTBASE_API_URL", "https://default.example")
+    monkeypatch.setenv("CONTEXTBASE_API_TOKEN", "saved-round-key")
+    monkeypatch.setenv("CONTEXTBASE_BANK_ID", "default-bank")
+    basic = {"dataset": "locomo", "split": "locomo10", "backend": "contextbase"}
+    with TestClient(create_app(tmp_path / "runs"), base_url="http://127.0.0.1") as client:
+        connection = {"api_url": "https://default.example", "bank_id": "test-bank"}
+        invalid = client.post("/api/runs", json={**basic, "connection": {**connection, "api_key": "secret-in-invalid-form"}})
+        assert invalid.status_code == 422 and "secret-in-invalid-form" not in invalid.text
+        invalid = client.post("/api/runs", json={**basic, "name": "   ", "connection": connection})
+        assert invalid.status_code == 422
+        invalid = client.post("/api/runs", json={**basic, "name": "A", "connection": connection})
+        assert invalid.status_code == 422 and "API Key" in invalid.json()["detail"]
+        invalid = client.post("/api/runs", json={**basic, "name": "A", "connection": {
+            **connection, "api_url": "https://other.example", "use_saved_key": True,
+        }})
+        assert invalid.status_code == 422 and "对应的 API 地址" in invalid.json()["detail"]
+        assert "saved-round-key" not in invalid.text
+        assert client.get("/api/runs").json() == []
+
+
+def test_progress_tracks_parallel_writes_and_answers_independently(monkeypatch, tmp_path):
+    dataset = BEAMDataset()
+    turn = {"role": "user", "content": "Paris"}
+    question = {"question": "Where?", "answer": "Paris"}
+    monkeypatch.setattr(dataset, "_load_raw", lambda split: [
+        {
+            "conversation_id": unit, "chat": [[turn]] * documents,
+            "probing_questions": {"information_extraction": [question]},
+        }
+        for unit, documents in (("first", 2), ("second", 1))
+    ])
+    started_second_write = asyncio.Event()
+    finish_second_write = asyncio.Event()
+    clock = 0.0
+
+    def perf_counter():
+        return clock
+
+    monkeypatch.setattr("memory_bench.runner.time.perf_counter", perf_counter)
+
+    class Memory(MemoryProvider):
+        name = "parallel-test"
+        unit_concurrency = 2
+
+        def ingest(self, documents):
+            pytest.fail("expected asynchronous ingestion")
+
+        async def async_ingest(self, documents):
+            nonlocal clock
+            if documents[0].user_id == "second":
+                started_second_write.set()
+                await asyncio.wait_for(finish_second_write.wait(), timeout=5)
+                clock = 0.2
+            else:
+                await asyncio.wait_for(started_second_write.wait(), timeout=5)
+                clock = 0.15
+
+        def retrieve(self, query, k=10, user_id=None, query_timestamp=None):
+            pytest.fail("the stub answers directly")
+
+    class Judge:
+        model_id = "test-judge"
+
+        def generate(self, prompt, schema):
+            return {"score": 1.0, "reason": "matches"}
+
+    class Mode(RAGMode):
+        async def async_answer(self, query, memory, task_type="open", user_id=None, meta=None):
+            if user_id == "first":
+                await asyncio.wait_for(started_second_write.wait(), timeout=5)
+                finish_second_write.set()
+            return AnswerResult(answer="Paris", reasoning="", context="Paris", retrieve_time_ms=1.0)
+
+    monkeypatch.setattr(dataset, "default_judge_llm", Judge)
+    updates = []
+    runner = EvalRunner(tmp_path, on_progress=updates.append)
+    summary = runner.run(dataset, "100k", Memory(), Mode(Judge()))
+
+    assert updates[0] == EvaluationProgress("ingesting", 0, 2, 0, 3)
+    assert EvaluationProgress("ingesting_and_evaluating", 0, 2, 2, 3) in updates
+    assert [update.completed for update in updates] == sorted(update.completed for update in updates)
+    assert [update.ingested_docs for update in updates] == sorted(update.ingested_docs for update in updates)
+    assert updates[-1] == EvaluationProgress("finalizing", 2, 2, 3, 3)
+    assert summary.ingestion_time_ms == 350.0
+    assert summary.ingestion_wall_time_ms == 200.0
+
+
+def test_workbench_migrates_legacy_credentials_out_of_results(tmp_path, private_workbench_config):
+    results = tmp_path / "amb-results" / "workbench"
+    legacy = results / ".connections.json"
+    results.mkdir(parents=True)
+    key = "mock-key-used-for-migration"
+    legacy.write_text(json.dumps({
+        "contextbase": {"api_url": "https://example.test", "api_key": key, "bank_id": "test-bank"},
+    }), encoding="utf-8")
+
+    with TestClient(create_app(results), base_url="http://127.0.0.1") as client:
+        config = client.get("/api/config")
+        saved = config.json()["backends"]["contextbase"]
+        assert saved["has_key"] and saved["saved"]
+        assert saved["api_url"] == "https://example.test" and saved["bank_id"] == "test-bank"
+        assert key not in config.text
+    assert not legacy.exists()
+    private, = private_workbench_config.glob("*/connections.json")
+    assert json.loads(private.read_text(encoding="utf-8"))["contextbase"]["api_key"] == key
+
+    archive = io.BytesIO()
+    with ZipFile(archive, "w") as exported:
+        for path in results.parent.rglob("*"):
+            if path.is_file():
+                exported.write(path, path.relative_to(results.parent))
+    with ZipFile(archive) as exported:
+        assert all(key.encode() not in exported.read(name) for name in exported.namelist())
+
+    with TestClient(create_app(results), base_url="http://127.0.0.1") as restarted:
+        assert restarted.get("/api/config").json()["backends"]["contextbase"] == saved
+
+
+def test_workbench_refuses_config_directory_inside_results(monkeypatch, tmp_path):
+    results = tmp_path / "runs"
+    monkeypatch.setenv("AMB_WORKBENCH_CONFIG_DIR", str(results / "config"))
+    with pytest.raises(ValueError, match="outside the Workbench results directory"):
+        create_app(results)

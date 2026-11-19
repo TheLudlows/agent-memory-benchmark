@@ -230,6 +230,13 @@
         }
       }
     },
+    "contextbase": {
+      "key": "contextbase",
+      "description": "ContextBase Retain and Recall over HTTP using pre-authorized Banks.",
+      "kind": "cloud",
+      "link": null,
+      "logo": null
+    },
     "bm25": {
       "key": "bm25",
       "description": "Keyword search baseline. No embeddings \u2014 splits docs into chunks and uses BM25 ranking.",

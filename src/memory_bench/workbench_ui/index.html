@@ -58,7 +58,7 @@
             <output id="full-count" aria-labelledby="question-count-label" hidden></output>
             <label class="check"><input id="full" type="checkbox"> 跑全量</label>
           </div>
-          <p class="hint">限制题数时，仍会写入所选题目对应的会话历史。</p>
+          <p id="dataset-coverage" class="hint">限制题数时，仍会写入所选题目对应的会话历史。</p>
           <p id="config-error" class="error" hidden></p>
           <button id="start" class="primary" type="submit" disabled>开始评测</button>
           <p role="alert" id="form-error" class="error" hidden></p>
@@ -92,19 +92,22 @@
               <progress id="ingestion-progress" aria-label="已写入文档数" max="1"></progress>
             </div>
             <div id="questions-progress-row" class="run-progress-row" hidden>
-              <div class="progress-caption"><span>答题与评分进度</span><span id="progress-count"></span></div>
+              <div class="progress-caption"><span id="questions-progress-label">答题与评分进度</span><span id="progress-count"></span></div>
               <progress id="progress" aria-label="已处理题数" max="1"></progress>
             </div>
             <div class="metrics" id="metrics" hidden>
               <div><span id="score-label">准确率</span><strong id="score"></strong></div>
-              <div><span>答对 / 总题数</span><strong id="correct"></strong></div>
+              <div><span id="correct-label">答对 / 总题数</span><strong id="correct"></strong></div>
+              <div id="active-passes-row" hidden><span>实际检索通过 / 用例数</span><strong id="active-passes"></strong></div>
+              <div id="precision-row" hidden><span>平均检索精确率</span><strong id="precision"></strong></div>
+              <div id="recall-row" hidden><span>平均检索召回率</span><strong id="recall"></strong></div>
               <div><span id="ingestion-label">写入实际耗时</span><strong id="ingestion"></strong></div>
               <div><span>平均检索延迟</span><strong id="retrieval"></strong></div>
               <div><span>检索 P95</span><strong id="retrieval-p95"></strong></div>
               <div><span>写入文档数</span><strong id="ingested-docs"></strong></div>
             </div>
             <figure id="distribution" class="chart" hidden>
-              <figcaption>答题分布</figcaption>
+              <figcaption id="distribution-label">答题分布</figcaption>
               <div id="distribution-bars"></div>
               <p id="distribution-note" class="hint" hidden>BEAM 单题得分 ≥ 0.5 计为答对。</p>
             </figure>

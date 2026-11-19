@@ -2,6 +2,7 @@ from .base import Dataset
 from .beam import BEAMDataset
 from .knowledge import KNOWLEDGE_DATASETS
 from .lifebench import LifeBenchDataset
+from .lifebench_v2 import LifeBenchV2Dataset
 from .locomo import LoComoDataset
 from .locomo_fixed import LoComoFixedDataset
 from .longmemeval import LongMemEvalDataset
@@ -13,6 +14,7 @@ from .supportbench import SupportBenchDataset
 REGISTRY: dict[str, type[Dataset]] = {
     "beam":         BEAMDataset,
     "lifebench":    LifeBenchDataset,
+    "lifebench-v2": LifeBenchV2Dataset,
     "locomo":       LoComoDataset,
     "locomo-fixed": LoComoFixedDataset,
     "longmemeval":  LongMemEvalDataset,    "personamem":   PersonaMemDataset,

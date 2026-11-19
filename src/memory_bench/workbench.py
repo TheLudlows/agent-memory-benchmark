@@ -25,8 +25,10 @@ from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from .dataset import get_dataset
 from .dataset.beam import BEAMDataset, DEFAULT_JUDGE_MODEL, SPLITS as BEAM_SPLITS, local_data_path as beam_local_data_path
+from .dataset.lifebench_v2 import SPLITS as LIFEBENCH_V2_SPLITS, TOTAL_QUERIES as LIFEBENCH_V2_QUERIES
 from .dataset.locomo import SPLITS as LOCOMO_SPLITS
 from .dataset.longmemeval import SPLITS as LONGMEMEVAL_SPLITS
+from .dataset.precisionmembench import SPLITS as PRECISIONMEMBENCH_SPLITS, TOTAL_QUERIES as PRECISIONMEMBENCH_QUERIES
 from .workbench_connections import BackendId, Connections, RunConnection
 from .workbench_models import ROLES, ModelInput, ModelProbeExit, ModelProbeInput, ModelSettings, Role
 
@@ -34,13 +36,18 @@ DATASETS = {
     "locomo": LOCOMO_SPLITS,
     "beam": BEAM_SPLITS,
     "longmemeval": LONGMEMEVAL_SPLITS,
+    "lifebench-v2": LIFEBENCH_V2_SPLITS,
+    "precisionmembench": PRECISIONMEMBENCH_SPLITS,
 }
+RETRIEVAL_DATASETS = {"precisionmembench"}
 # Counts from data/<dataset>/<split>/stats.json.gz. Previews of the standard
 # splits should be available before the evaluation downloads their corpora.
 STANDARD_QUERY_COUNTS = {
     "locomo": {"locomo10": 1540},
     "beam": {"100k": 400, "500k": 700, "1m": 700, "10m": 200},
     "longmemeval": {"s": 500},
+    "lifebench-v2": {"zh": LIFEBENCH_V2_QUERIES},
+    "precisionmembench": {"single-turn": PRECISIONMEMBENCH_QUERIES},
 }
 RUN_ID = re.compile(r"[0-9a-f]{32}")
 SCORING_INCOMPLETE_EXIT_CODE = 2
@@ -50,10 +57,14 @@ ASSETS = Path(__file__).with_name("workbench_ui")
 
 class RunSelection(BaseModel):
     model_config = ConfigDict(extra="forbid")
-    dataset: Literal["locomo", "beam", "longmemeval"]
+    dataset: Literal["locomo", "beam", "longmemeval", "lifebench-v2", "precisionmembench"]
     split: str
     backend: BackendId
     query_limit: int | None = Field(default=5, ge=1, strict=True)
+
+    @property
+    def mode(self) -> str:
+        return "retrieval" if self.dataset in RETRIEVAL_DATASETS else "rag"
 
     @model_validator(mode="after")
     def check_split(self):
@@ -127,7 +138,9 @@ class RunManager:
                 raise HTTPException(409, "已有评测正在运行。")
             try:
                 connection = self.connections.for_run(selection.backend, selection.connection)
-                models, model_env = self.models.for_run(selection.dataset)
+                models, model_env = {}, {}
+                if selection.mode == "rag":
+                    models, model_env = self.models.for_run(selection.dataset)
             except ValueError as exc:
                 raise HTTPException(422, str(exc)) from exc
             try:
@@ -228,8 +241,8 @@ class RunManager:
 
 
 def _result_path(directory: Path, job: dict) -> Path:
-    selection = job["selection"]
-    return directory / "results" / selection["dataset"] / f"web-{job['id']}" / "rag" / f"{selection['split']}.json"
+    selection = RunSelection.model_validate(job["selection"])
+    return directory / "results" / selection.dataset / f"web-{job['id']}" / selection.mode / f"{selection.split}.json"
 
 
 async def _stream_result(path: Path):
@@ -285,6 +298,7 @@ def create_app(output_dir: Path) -> FastAPI:
     def config():
         return {
             "datasets": DATASETS,
+            "retrieval_datasets": sorted(RETRIEVAL_DATASETS),
             "split_errors": {"beam": {
                 split: error for split in BEAM_SPLITS if (error := _dataset_error("beam", split))
             }},
@@ -303,7 +317,7 @@ def create_app(output_dir: Path) -> FastAPI:
                 local_path = beam_local_data_path(split, require_split=True)
                 loader = BEAMDataset(require_local_split=True)
             else:
-                local_path = os.getenv(f"{dataset.upper()}_DATA_PATH")
+                local_path = os.getenv(f"{dataset.replace('-', '_').upper()}_DATA_PATH")
                 loader = get_dataset(dataset)
             count = len(loader.load_queries(split)) if local_path else STANDARD_QUERY_COUNTS[dataset][split]
         except (OSError, ValueError, TypeError, KeyError, AttributeError) as exc:

@@ -6,7 +6,7 @@ Live leaderboard: **[agentmemorybenchmark.ai](https://agentmemorybenchmark.ai)**
 
 ## Docker quick start · 一键运行 LoCoMo
 
-在已克隆的仓库中使用 Docker Compose 2.24 或更新版本。镜像内置 LoCoMo 原始数据和分词表，连接已启动的 Hindsight 测试 API。首次构建需要联网。
+在已克隆的仓库中使用 Docker Compose 2.24 或更新版本。镜像内置评测台的全部数据集和分词表。首次构建需安装依赖，运行时只需能访问配置的评测后端和模型服务。
 
 1. 将仓库根目录的 `.env.example` 复制为 `.env`，填写 `GEMINI_API_KEY`。默认由 Gemini 回答和评分。
 2. 将 `HINDSIGHT_HTTP_URL` 指向测试实例，启用鉴权时填写 `HINDSIGHT_HTTP_KEY`。宿主机服务用 `http://host.docker.internal:8888`，远端服务用实际 URL。Linux 上宿主机服务的监听地址须允许容器网桥访问。
@@ -26,7 +26,7 @@ docker compose run --rm --build amb run --dataset locomo --split locomo10 --memo
 
 PR 的 GitHub Actions 构建成功后，也可下载 linux/amd64 镜像产物 `amb-locomo-linux-amd64`。解压下载的 ZIP，执行 `docker load -i amb-locomo-linux-amd64.tar.gz`，然后在仓库目录用 `docker compose run --rm amb` 启动。
 
-主分支镜像工作流成功后，亦可在仓库的 Packages 页面获取 `ghcr.io/theludlows/agent-memory-benchmark:latest` 或对应的 `sha-<commit>` 标签。镜像内 LoCoMo 的来源是 [snap-research/locomo](https://github.com/snap-research/locomo/tree/3eb6f2c585f5e1699204e3c3bdf7adc5c28cb376)，授权文件位于 `/opt/locomo/LICENSE.txt`。
+主分支镜像工作流成功后，亦可在仓库的 Packages 页面获取 `ghcr.io/theludlows/agent-memory-benchmark:latest` 或对应的 `sha-<commit>` 标签。镜像内 LoCoMo 的来源是 [snap-research/locomo](https://github.com/snap-research/locomo/tree/3eb6f2c585f5e1699204e3c3bdf7adc5c28cb376)，授权文件位于 `data/offline/locomo/LICENSE.txt`。
 
 ## The problem with existing benchmarks
 
@@ -97,9 +97,9 @@ uv run amb view
 
 ### AMB Workbench · 浏览器评测
 
-评测台可搭配 LoCoMo、BEAM 或 LongMemEval 和 ContextBase、Mem0 Cloud 或 Hindsight HTTP。
+评测台支持 LoCoMo、BEAM、LongMemEval、LifeBench 2.0 中文版和 PrecisionMemBench，可搭配 ContextBase、Mem0 Cloud 或 Hindsight HTTP。
 每轮填写评测名称，选择数据集、split 和后端，默认跑 5 题，也可跑全量。题数上限只限制问答，
-选中题目对应的会话历史仍会写入。运行详情会显示当前阶段、已用时、已写入的文档数和已处理的题数。
+LoCoMo、BEAM 和 LongMemEval 仍会写入所选题目对应的会话历史。PrecisionMemBench 始终写入完整测试数据。运行详情会显示当前阶段、已用时、已写入的文档数和已处理的题数。
 写入进度每组文档处理完后更新，答题进度逐题更新。结束后可查看得分、写入耗时、平均检索延迟，
 或下载 AMB 逐题结果 JSON。完成的评测会保存得分、题数、写入耗时、文档数、平均检索延迟和检索 P95。
 在「运行历史」勾选 2 至 4 轮，即可用图表对比得分与耗时。页面会提示题目、写入资料或回答、评分模型不一致的情况。
@@ -143,12 +143,24 @@ Docker Compose 使用独立的 `amb-workbench-config` 卷。升级后，旧的 `
 
 没有保存网页默认配置时，系统使用 `.env` 中的 `OMB_ANSWER_LLM`、`OMB_ANSWER_MODEL`、`OMB_JUDGE_LLM`、`OMB_JUDGE_MODEL` 和相应提供方的 Key。页面可随时恢复这些默认值。ContextBase 和 Hindsight 在各自服务内配置写入和检索使用的模型。
 
-可选 split 为 LoCoMo `locomo10`、BEAM `100k / 500k / 1m / 10m`、LongMemEval `s`。Compose 镜像
-内置 LoCoMo，首次运行其他数据集时会下载数据。直接运行时可通过 `LOCOMO_DATA_PATH`、
+可选 split 为 LoCoMo `locomo10`、BEAM `100k / 500k / 1m / 10m`、LongMemEval `s`、
+LifeBench 2.0 `zh`（3,380 题）、PrecisionMemBench `single-turn`（77 个用例）。以上数据和分词表都随仓库及
+镜像提供。使用完整仓库并提前安装依赖，或提前导入构建好的镜像，运行时无需连接数据源网站。
+仍可通过 `LOCOMO_DATA_PATH`、
 `LONGMEMEVAL_DATA_PATH` 指定本地数据。BEAM 按 split 使用 `BEAM_100K_DATA_PATH`、
 `BEAM_500K_DATA_PATH`、`BEAM_1M_DATA_PATH` 或 `BEAM_10M_DATA_PATH`。如果评测台继续使用
 `BEAM_DATA_PATH`，需要同时用 `BEAM_DATA_SPLIT` 指明文件所属的标准 split。没有指定本地文件的 split
-会使用对应的官方数据。比较不同后端时，请使用相同的 split、题数和回答及评分模型。
+会使用仓库随附的对应数据。比较不同后端时，请使用相同的 split、题数和回答及评分模型。
+
+- **LifeBench 2.0 中文版**使用官方原始中文数据。每个用户的档案、日常事件和九类手机记录按日期和来源写入，
+  AMB 用中文回答，并根据参考答案和评分要点判定正误。可用 `LIFEBENCH_V2_DATA_PATH` 指向官方中文 `data/`
+  目录，该目录直接包含各用户文件夹。评测按用户和提问日期推进，每批只补写截至该日期的记录，
+  并等待写入完成才作答。CLI 运行需要支持增量写入的后端，每轮从新的时间线开始。
+- **PrecisionMemBench**直接用返回的记忆比对预期 ID，评测台无需配置回答或评分模型。
+  结果展示总通过率、实际检索用例通过数、平均检索精确率和召回率。可用
+  `PRECISIONMEMBENCH_DATA_PATH` 指向含 `beliefs.seed.json` 和 `retrieval.cases.json` 的目录。
+  检索报错或无法映射来源的用例会使总分标记为未完成。Hindsight HTTP 使用原有的共享 Bank、用户标签和召回过滤，
+  服务端需支持对应的 Bank 配置和标签筛选。
 
 BEAM 有答案的题目如果没有召回内容，以 0 分计入平均分。数据集标注的拒答题（`abstention`）即使
 没有召回内容，也会按评分标准检查模型是否说明信息不足。评分服务失败时，运行标为「评分未完成」并显示失败题数。

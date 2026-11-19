@@ -7,6 +7,9 @@ on:
       - Dockerfile.dockerignore
       - compose.yaml
       - src/**
+      - data/offline/**
+      - data/beam/**
+      - data/longmemeval/**
       - pyproject.toml
       - uv.lock
       - .github/workflows/locomo-image.yml
@@ -25,14 +28,22 @@ jobs:
       - uses: actions/checkout@v4
       - name: Build runner
         run: docker compose build amb
-      - name: Validate packaged CLI and dataset offline
+      - name: Validate packaged CLI and datasets offline
         run: |
           docker run --rm --network none amb-locomo:local dataset-stats --dataset locomo
           docker run --rm --network none --entrypoint python amb-locomo:local -c "
-          from memory_bench.dataset.locomo import LoComoDataset
+          from memory_bench.dataset import get_dataset
           from memory_bench.memory import get_memory_provider
           from memory_bench.utils import count_tokens
-          assert len(LoComoDataset().load_queries('locomo10')) == 1540
+          splits = {'locomo': {'locomo10': 1540}, 'longmemeval': {'s': 500},
+                    'beam': {'100k': 400, '500k': 700, '1m': 700, '10m': 200},
+                    'lifebench-v2': {'zh': 3380}, 'precisionmembench': {'single-turn': 77}}
+          for name, sizes in splits.items():
+              dataset = get_dataset(name)
+              for split, size in sizes.items():
+                  queries = dataset.load_queries(split)
+                  assert len(queries) == size, (name, split, len(queries))
+                  assert dataset.load_documents(split, user_ids={queries[0].user_id}, limit=1), (name, split)
           assert get_memory_provider('hindsight-http').name == 'hindsight-http'
           assert count_tokens('LoCoMo') > 0"
       - name: Export tested image

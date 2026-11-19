@@ -18,6 +18,7 @@ class ContextBaseMemoryProvider(MemoryProvider):
     name = "contextbase"
     description = "ContextBase Retain and Recall over HTTP using pre-authorized Banks."
     kind = "cloud"
+    supports_incremental_ingest = True
 
     def __init__(self) -> None:
         url = os.environ.get("CONTEXTBASE_API_URL", "").strip()
@@ -212,4 +213,9 @@ class ContextBaseMemoryProvider(MemoryProvider):
         if not isinstance(raw.get("results"), list):
             raise RuntimeError(f"ContextBase Recall returned an invalid results field for {path}")
         recall = _as_recall_response(raw)
-        return _build_docs(_deduplicate_results(recall.results), recall.chunks), raw
+        docs = _build_docs(_deduplicate_results(recall.results), recall.chunks)
+        prefix = f"amb-{self.ingestion_run_id}-"
+        for doc in docs:
+            if doc.source_ids:
+                doc.source_ids = list(dict.fromkeys(source.removeprefix(prefix) for source in doc.source_ids))
+        return docs, raw

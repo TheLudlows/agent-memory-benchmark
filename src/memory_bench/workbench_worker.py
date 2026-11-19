@@ -52,14 +52,16 @@ def run(directory: Path) -> int:
             document_digest.update((item + "\n").encode("utf-8"))
 
     models = job["models"]
+    answer_llm = worker_model("answer", models["answer"]) if spec.mode == "rag" else None
+    judge_llm = worker_model("judge", models["judge"]) if spec.mode == "rag" else None
     runner = EvalRunner(
         output_dir=directory / "results", on_progress=progress, on_documents=record_documents,
-        judge_llm=worker_model("judge", models["judge"]),
+        judge_llm=judge_llm,
     )
     dataset = BEAMDataset(require_local_split=True) if spec.dataset == "beam" else get_dataset(spec.dataset)
     summary = runner.run(
         dataset=dataset, split=spec.split, memory=memory,
-        mode=get_mode("rag", llm=worker_model("answer", models["answer"])), query_limit=spec.query_limit, run_name="web-" + run_id,
+        mode=get_mode(spec.mode, llm=answer_llm), query_limit=spec.query_limit, run_name="web-" + run_id,
         description=job.get("name"),
     )
     if not expected_queries or summary.total_queries != expected_queries:
@@ -73,6 +75,11 @@ def run(directory: Path) -> int:
             row.query_id, row.query, row.gold_answers, row.category_axes,
             row.meta.get("rubric"), row.meta.get("query_timestamp"),
         ]
+        if spec.mode == "retrieval":
+            question.extend(row.meta.get(key) for key in ("scope", "budget", "expect"))
+            question.append("source_attribution_required")
+        if dataset.query_timestamp_cutoff:
+            question.append("ingest_until_query_time")
         question_digest.update((json.dumps(question, ensure_ascii=False, sort_keys=True) + "\n").encode("utf-8"))
     write_json(directory / "summary.json", {
         "score": summary.accuracy,
@@ -88,6 +95,7 @@ def run(directory: Path) -> int:
         "document_fingerprint": document_digest.hexdigest(),
         "answer_llm": summary.answer_llm,
         "judge_llm": summary.judge_llm,
+        **dataset.summary_metrics(summary.results),
     })
     return SCORING_INCOMPLETE_EXIT_CODE if summary.scoring_failed_queries else 0
 

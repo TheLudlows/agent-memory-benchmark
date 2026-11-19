@@ -15,14 +15,19 @@ class Mem0CloudMemoryProvider(MemoryProvider):
     name = "mem0-cloud"
     description = "Mem0 cloud API. Async indexing — waits for indexing to complete before eval. k=20."
     kind = "cloud"
+    supports_incremental_ingest = True
     provider = "mem0"
     variant = "cloud"
 
     def __init__(self, k: int = 20, *, user_prefix: str = ""):
         self.k = k
         self._client = None
+        self._configured_user_prefix = user_prefix
         self._user_prefix = user_prefix
         self._default_user_id = f"bench_{uuid.uuid4().hex[:8]}"
+
+    def prepare(self, store_dir: Path, unit_ids: set[str] | None = None, reset: bool = True) -> None:
+        self._user_prefix = self._configured_user_prefix
 
     def _ensure_client(self):
         if self._client is None:
@@ -52,6 +57,12 @@ class Mem0CloudMemoryProvider(MemoryProvider):
 
         if user_ids and not self._user_prefix:
             self._wait_for_indexing(client, user_ids)
+
+    async def async_ingest_increment(self, documents: list[Document], *, first: bool) -> None:
+        if not self._user_prefix:
+            # A temporal CLI run also needs fresh storage and synchronous indexing.
+            self._user_prefix = f"amb-temporal-{uuid.uuid4().hex}-"
+        await self.async_ingest(documents)
 
     def _user_id(self, user_id: str | None) -> str:
         return self._user_prefix + (user_id or self._default_user_id)
@@ -92,5 +103,7 @@ class Mem0CloudMemoryProvider(MemoryProvider):
             meta = r.get("metadata") or {}
             if meta:
                 lines.append(f"metadata: {meta}")
-            docs.append(Document(id=r["id"], content="\n".join(lines)))
+            doc_id = meta.get("doc_id")
+            docs.append(Document(id=r["id"], content="\n".join(lines),
+                                 source_ids=[doc_id] if doc_id else None))
         return docs, raw

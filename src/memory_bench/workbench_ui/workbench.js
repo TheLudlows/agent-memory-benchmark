@@ -1,6 +1,13 @@
 const $ = (id) => document.getElementById(id);
-const names = { locomo: "LoCoMo", beam: "BEAM", longmemeval: "LongMemEval" };
+const names = {
+  locomo: "LoCoMo", beam: "BEAM", longmemeval: "LongMemEval",
+  "lifebench-v2": "LifeBench 2.0 中文版", precisionmembench: "PrecisionMemBench",
+};
 const statuses = { running: "运行中", cancelling: "停止中", completed: "已完成", scoring_incomplete: "评分未完成", failed: "失败", cancelled: "已停止", interrupted: "已中断" };
+const retrievalOnly = (dataset) => settings?.retrieval_datasets?.includes(dataset);
+const modelLabels = (job) => retrievalOnly(job.selection.dataset)
+  ? "纯检索评测"
+  : `回答 ${storedModelDetail(job, "answer")} · 评分 ${storedModelDetail(job, "judge")}`;
 const stages = {
   loading: "加载数据集", ingesting: "写入记忆", evaluating: "检索、回答与评分",
   ingesting_and_evaluating: "同时写入和答题", finalizing: "整理评测结果",
@@ -264,9 +271,14 @@ function updateForm() {
   const usingSaved = saved?.has_key && $("connection-reuse").checked;
   const splitError = settings.split_errors?.[$("dataset").value]?.[$("split").value];
   for (const editor of Object.values(modelEditors)) updateModelEditor(editor);
+  const dataset = $("dataset").value;
+  const retrieval = retrievalOnly(dataset);
   const missing = Object.keys(modelRoles).filter((role) => !settings.models[role].has_key);
-  const modelError = missing.length
+  const modelError = !retrieval && missing.length
     ? `请在「全局模型设置」配置${missing.map((role) => modelRoles[role]).join("和")}。` : "";
+  $("dataset-coverage").textContent = retrieval ? "纯检索评分，写入完整测试数据。"
+    : dataset === "lifebench-v2" ? "按提问日期写入记录，之后的资料在该题作答时不可见。"
+    : "限制题数时，仍会写入所选题目对应的会话历史。";
   const ready = $("evaluation-name").value.trim() && connection.api_url &&
     (config.key_optional || connection.api_key || usingSaved) &&
     (backend !== "contextbase" || connection.bank_id || saved?.has_bank_mapping);
@@ -338,13 +350,15 @@ function comparisonWarning(runs) {
   if (differs(judgeModels) || differs(endpoints("judge"))) mismatches.push("评分模型");
   const missingEndpoint = ["answer", "judge"].some((role) => runs.some((run) =>
     storedModelLabel(run, role)?.startsWith("openai:") && !run.models?.[role]?.api_url));
-  const missing = missingEndpoint || [questions, documents, answerModels, judgeModels]
+  const checkModels = runs.some((run) => !retrievalOnly(run.selection.dataset));
+  const fields = checkModels ? [questions, documents, answerModels, judgeModels] : [questions, documents];
+  const missing = missingEndpoint || fields
     .some((values) => values.some((value) => !value));
   const unknown = "部分评测缺少题目、写入资料或模型信息，无法确认这些评测的口径。";
   if (mismatches.length) {
     return `${mismatches.join("、")}不同，分数不可直接比较。` + (missing ? unknown : "");
   }
-  return missing ? unknown : "题目、写入资料、回答模型和评分模型一致。";
+  return missing ? unknown : checkModels ? "题目、写入资料、回答模型和评分模型一致。" : "题目和写入资料一致。";
 }
 
 const wallWriteTime = (summary) => summary.ingestion_wall_time_ms;
@@ -371,16 +385,24 @@ async function drawComparison() {
       const item = document.createElement("li");
       const count = run.summary.total_queries;
       item.textContent = `${i + 1}. ${title(run)} · ${runType(run)} · ${count ?? "—"} 题` +
-        ` · 回答 ${storedModelDetail(run, "answer")} · 评分 ${storedModelDetail(run, "judge")}` +
+        ` · ${modelLabels(run)}` +
         (run.summary.scoring_failed_queries ? ` · 评分失败 ${run.summary.scoring_failed_queries} 题` : "");
       $("compare-meta").append(item);
     }
     const metrics = [
-      [runs.every((run) => run.selection.dataset === "beam") ? "平均得分" : "得分 / 准确率",
+      [runs.every((run) => retrievalOnly(run.selection.dataset)) ? "用例通过率"
+        : runs.every((run) => run.selection.dataset === "beam") ? "平均得分" : "得分 / 准确率",
         (s) => s.score, scoreText, 1],
       ["平均检索延迟", (s) => s.avg_retrieve_time_ms, (value) => number(value, " ms")],
       ["检索 P95", (s) => s.p95_retrieve_time_ms, (value) => number(value, " ms")],
     ];
+    if (runs.some((run) => retrievalOnly(run.selection.dataset))) {
+      metrics.push(
+        ["实际检索用例通过率", (s) => s.active_total ? s.active_passes / s.active_total : null, scoreText, 1],
+        ["平均检索精确率", (s) => s.mean_precision, scoreText, 1],
+        ["平均检索召回率", (s) => s.mean_recall, scoreText, 1],
+      );
+    }
     if (runs.some((run) => wallWriteTime(run.summary) != null)) {
       metrics.push(["写入实际耗时", wallWriteTime, seconds]);
     }
@@ -457,7 +479,8 @@ function renderRunProgress(job) {
   const { stage, completed, total, ingested_docs, total_docs } = job.progress;
   const active = isActive(job);
   $("stage").textContent = job.status === "cancelling" ? statuses.cancelling :
-    active ? (stages[stage] || "准备评测") : statuses[job.status];
+    active ? (stage === "evaluating" && retrievalOnly(job.selection.dataset) ? "检索与判定"
+      : stages[stage] || "准备评测") : statuses[job.status];
   $("loading-progress").hidden = !(active && (!stage || stage === "loading"));
   renderProgress("ingestion-progress-row", "ingestion-progress", "ingestion-progress-count",
     ingested_docs, total_docs, "份文档");
@@ -476,7 +499,7 @@ async function loadDetail(id) {
   $("empty").hidden = true;
   $("run-detail").hidden = false;
   $("run-name").textContent = title(job);
-  $("run-meta").textContent = `${runType(job)} · ${formatDate(job.started_at)} · 回答 ${storedModelDetail(job, "answer")} · 评分 ${storedModelDetail(job, "judge")}`;
+  $("run-meta").textContent = `${runType(job)} · ${formatDate(job.started_at)} · ${modelLabels(job)}`;
   const target = job.target;
   $("run-target").hidden = !target?.api_url;
   $("run-target").textContent = target?.api_url
@@ -489,9 +512,22 @@ async function loadDetail(id) {
   renderRunProgress(job);
 
   const s = job.summary;
+  const retrieval = retrievalOnly(job.selection.dataset);
+  $("questions-progress-label").textContent = retrieval ? "检索用例进度" : "答题与评分进度";
+  $("distribution-label").textContent = retrieval ? "用例通过分布" : "答题分布";
+  for (const [id, value] of [
+    ["active-passes", s.active_total == null ? null : `${s.active_passes} / ${s.active_total}`],
+    ["precision", s.mean_precision == null ? null : scoreText(s.mean_precision)],
+    ["recall", s.mean_recall == null ? null : scoreText(s.mean_recall)],
+  ]) {
+    $(`${id}-row`).hidden = !retrieval || value == null;
+    $(id).textContent = value ?? "";
+  }
   $("metrics").hidden = !s.total_queries;
   if (s.total_queries) {
-    $("score-label").textContent = job.selection.dataset === "beam" ? "平均得分" : "准确率";
+    $("score-label").textContent = retrieval ? "用例通过率"
+      : job.selection.dataset === "beam" ? "平均得分" : "准确率";
+    $("correct-label").textContent = retrieval ? "通过 / 总用例数" : "答对 / 总题数";
     $("score").textContent = scoreText(s.score);
     $("correct").textContent = s.scoring_failed_queries ? "—" : `${s.correct} / ${s.total_queries}`;
     $("ingestion-label").textContent = wallWriteTime(s) == null ? "累计写入耗时（旧口径）" : "写入实际耗时";
@@ -501,7 +537,7 @@ async function loadDetail(id) {
     $("ingested-docs").textContent = s.ingested_docs ?? "—";
     const failed = s.scoring_failed_queries ?? 0;
     bars($("distribution-bars"), [
-      ["答对", s.correct], ["未达标", s.total_queries - s.correct - failed], ["评分失败", failed],
+      [retrieval ? "通过" : "答对", s.correct], ["未达标", s.total_queries - s.correct - failed], ["评分失败", failed],
     ], s.total_queries, (value) => `${value} 题`);
   }
   $("distribution").hidden = !s.total_queries;
@@ -513,7 +549,9 @@ async function loadDetail(id) {
   if ($("log").textContent !== job.log) $("log").textContent = job.log;
   const failedScoring = job.status === "scoring_incomplete";
   setError("run-error", failedScoring
-    ? `${s.scoring_failed_queries} 道题评分失败，未生成总分。可下载已保存的逐题结果。`
+    ? (retrieval
+      ? `${s.scoring_failed_queries} 个用例因检索或来源错误无法评分。可下载逐题结果查看原因。`
+      : `${s.scoring_failed_queries} 道题评分失败，未生成总分。可下载已保存的逐题结果。`)
     : job.status === "failed" ? "评测进程退出，请查看日志。" : "");
 }
 

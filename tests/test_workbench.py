@@ -31,7 +31,10 @@ def private_workbench_config(monkeypatch, tmp_path):
 
 
 @pytest.fixture
-def mock_services():
+def mock_services(monkeypatch):
+    for name in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("MEM0_TELEMETRY", "false")
     calls = []
 
     class Handler(BaseHTTPRequestHandler):
@@ -45,7 +48,30 @@ def mock_services():
 
         def do_GET(self):
             calls.append((self.path, {}))
-            self.send_json({"status": "completed"})
+            if self.path.startswith("/v1/ping/"):
+                self.send_json({"org_id": "test-org", "project_id": "test-project"})
+            elif "/operations?" in self.path:
+                self.send_json({
+                    "bank_id": self.path.split("/")[4], "operations": [], "total": 0, "limit": 1, "offset": 0,
+                })
+            else:
+                self.send_json({"status": "completed"})
+
+        def do_DELETE(self):
+            self.send_json({})
+
+        def do_PUT(self):
+            body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+            calls.append((self.path, body))
+            self.send_json({
+                "bank_id": self.path.split("/")[4], "name": "Test bank", "mission": "",
+                "disposition": {"skepticism": 3, "literalism": 3, "empathy": 3},
+            })
+
+        def do_PATCH(self):
+            body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+            calls.append((self.path, body))
+            self.send_json({"bank_id": self.path.split("/")[4], "config": {}, "overrides": {}})
 
         def do_POST(self):
             body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
@@ -83,14 +109,33 @@ def mock_services():
                 self.send_json({"choices": [{"message": {"content": content}}]})
                 return
             calls.append((self.path, body))
-            if self.path.endswith("/memories"):
+            if self.path == "/v1/memories/":
+                self.send_json({"results": []})
+            elif self.path == "/v2/memories/search/":
+                self.send_json({"results": [{"id": "mem0-fact", "memory": "Expected fact", "metadata": {"doc_id": "b-present"}}]})
+            elif "/banks/amb-web-" in self.path and self.path.endswith("/memories"):
+                self.send_json({
+                    "bank_id": self.path.split("/")[4], "success": True, "async": True,
+                    "items_count": len(body["items"]), "operation_id": "test-op",
+                })
+            elif self.path.endswith("/memories"):
                 if self.headers.get("Authorization") != "Bearer test-bearer-value" or "/banks/ui-bank/" not in self.path:
                     self.send_json({"error": "Incorrect Workbench backend configuration"}, status=403)
                     return
                 self.send_json({"success": True, "async": True, "items_count": len(body["items"]), "operation_id": "test-op"})
             elif self.path.endswith("/memories/recall"):
                 empty_queries = {"No memory?", "What did they say about pets?", "What is their salary?"}
-                matches = [] if body["query"] in empty_queries else [{"id": "fact", "text": "The location is Paris"}]
+                if body["query"] == "Precision failure":
+                    self.send_json({"error": "Recall failed"}, status=403)
+                    return
+                if body["query"] == "Precision unknown source":
+                    matches = [{"id": "opaque-fact", "text": "An astronomical observatory is located in the desert."}]
+                elif "Precision test" in body["query"]:
+                    items = [item for path, payload in calls if path.endswith("/memories") for item in payload["items"]]
+                    document_id = next(item["document_id"] for item in items if item["metadata"]["doc_id"] == "b-present")
+                    matches = [{"id": "fact", "text": "Expected fact", "document_id": document_id}]
+                else:
+                    matches = [] if body["query"] in empty_queries else [{"id": "fact", "text": "The location is Paris", "type": "world"}]
                 self.send_json({"results": matches})
             else:
                 self.send_json({}, status=404)
@@ -121,12 +166,14 @@ def await_result(client, response):
 
 def test_standard_question_counts_without_loading_datasets(monkeypatch, tmp_path):
     for variable in ("LOCOMO_DATA_PATH", "LONGMEMEVAL_DATA_PATH", "BEAM_DATA_PATH", "BEAM_DATA_SPLIT",
-                     "BEAM_100K_DATA_PATH", "BEAM_500K_DATA_PATH", "BEAM_1M_DATA_PATH", "BEAM_10M_DATA_PATH"):
+                     "BEAM_100K_DATA_PATH", "BEAM_500K_DATA_PATH", "BEAM_1M_DATA_PATH", "BEAM_10M_DATA_PATH",
+                     "LIFEBENCH_V2_DATA_PATH", "PRECISIONMEMBENCH_DATA_PATH"):
         monkeypatch.delenv(variable, raising=False)
 
     with TestClient(create_app(tmp_path / "runs"), base_url="http://127.0.0.1") as client:
         for dataset, split, count in (
             ("locomo", "locomo10", 1540), ("longmemeval", "s", 500),
+            ("lifebench-v2", "zh", 3380), ("precisionmembench", "single-turn", 77),
             ("beam", "100k", 400), ("beam", "500k", 700), ("beam", "1m", 700), ("beam", "10m", 200),
         ):
             response = client.get(f"/api/datasets/{dataset}/{split}/query-count")
@@ -194,7 +241,7 @@ def test_datasets_run_through_local_api_and_worker(monkeypatch, tmp_path, mock_s
         assert client.get("/").status_code == 200
         assert client.get("/assets/workbench.js").status_code == 200
         config = client.get("/api/config").json()
-        assert set(config["datasets"]) == {case[0] for case in fixtures}
+        assert set(config["datasets"]) == {case[0] for case in fixtures} | {"lifebench-v2", "precisionmembench"}
         assert set(config["backends"]) == {"contextbase", "mem0-cloud", "hindsight-http"}
         assert config["backends"]["contextbase"]["missing"] == ["API 地址", "API Key", "Bank ID"]
 
@@ -900,3 +947,212 @@ def test_workbench_answer_probe_handles_plain_text_from_openai_gateway(monkeypat
     assert "response_format" in initial
     assert "response_format" not in fallback
     assert json.loads(fallback["messages"][0]["content"].splitlines()[-1])["required"] == ["reasoning", "answer"]
+
+
+@pytest.mark.parametrize("backend", ["contextbase", "hindsight-http", "mem0-cloud"])
+def test_precision_workbench_scores_source_ids_without_models(monkeypatch, tmp_path, mock_services, backend):
+    endpoint, calls = mock_services
+    for key in ("GEMINI_API_KEY", "OPENAI_API_KEY", "GROQ_API_KEY", "OMB_ANSWER_LLM", "OMB_JUDGE_LLM"):
+        monkeypatch.delenv(key, raising=False)
+    monkeypatch.setenv("PRECISIONMEMBENCH_DATA_PATH", str(tmp_path))
+    (tmp_path / "beliefs.seed.json").write_text(json.dumps([
+        {"_id": "b-present", "user_id": "test-user", "scope": ["code"], "content": "Expected fact"},
+        {"_id": "b-other", "user_id": "other-user", "scope": ["code"], "content": "Different account"},
+    ]))
+    (tmp_path / "retrieval.cases.json").write_text(json.dumps([
+        {
+            "caseId": "present", "category": "test", "scope": ["code"], "query": "Precision test",
+            "expect": {"relevantBeliefs": {"shouldOnlyInclude": ["b-present"]}},
+        },
+        {"caseId": "not-selected", "category": "test", "scope": [], "query": "", "expect": {}},
+    ]))
+    with TestClient(create_app(tmp_path / "runs"), base_url="http://127.0.0.1") as client:
+        assert client.get("/api/config").json()["retrieval_datasets"] == ["precisionmembench"]
+        assert client.get("/api/datasets/precisionmembench/single-turn/query-count").json() == {"query_count": 2}
+        connection = {"api_url": endpoint, "api_key": "test-bearer-value"}
+        if backend == "contextbase":
+            connection["bank_id"] = "ui-bank"
+        response = client.post("/api/runs", json={
+            "name": "Precision", "backend": backend, "dataset": "precisionmembench",
+            "split": "single-turn", "query_limit": 1, "connection": connection,
+        })
+        url, detail = await_result(client, response)
+        assert detail["status"] == "completed", detail["log"]
+        assert detail["models"] == {}
+        assert detail["summary"]["answer_llm"] is None
+        assert detail["summary"]["judge_llm"] is None
+        assert detail["summary"]["ingested_docs"] == 2
+        assert detail["summary"]["active_passes"] == detail["summary"]["active_total"] == 1
+        assert detail["summary"]["mean_recall"] == detail["summary"]["mean_precision"] == 1.0
+        result = client.get(url + "/result").json()
+        assert result["mode"] == "retrieval" and result["accuracy"] == 1.0
+        assert result["results"][0]["meta"]["resolution"] == {"source_id": 1}
+
+    assert not any(path.endswith("/chat/completions") for path, _ in calls)
+    if backend == "contextbase":
+        ingests = [item for path, payload in calls if path.endswith("/memories") for item in payload["items"]]
+        assert {"amb-unit:test-user", "amb-unit:other-user"} <= {tag for item in ingests for tag in item["tags"]}
+        recall, = [body for path, body in calls if path.endswith("/recall")]
+        assert "amb-unit:test-user" in recall["tags"] and "amb-unit:other-user" not in recall["tags"]
+    elif backend == "hindsight-http":
+        (path, ingest), = [(path, body) for path, body in calls if path.endswith("/memories")]
+        assert path.endswith("-precisionmembench-single-turn/memories")
+        assert {"user:test-user", "user:other-user"} <= {tag for item in ingest["items"] for tag in item["tags"]}
+        recall_path, recall = next((path, body) for path, body in calls if path.endswith("/recall"))
+        assert recall_path == f"{path}/recall"
+        assert "user:test-user" in str(recall["tag_groups"]) and "user:other-user" not in str(recall["tag_groups"])
+    else:
+        users = [body["user_id"] for path, body in calls if path == "/v1/memories/"]
+        assert sorted(user.rsplit("-", 2)[-2] for user in users) == ["other", "test"]
+        recall, = [body for path, body in calls if path == "/v2/memories/search/"]
+        assert recall["filters"]["user_id"].endswith("-test-user")
+
+
+@pytest.mark.parametrize("backend", ["contextbase", "hindsight-http", "mem0-cloud"])
+def test_lifebench_writes_only_the_history_available_to_each_question(monkeypatch, tmp_path, mock_services, backend):
+    from memory_bench.dataset.lifebench_v2 import _SOURCES
+
+    endpoint, calls = mock_services
+    monkeypatch.setenv("LIFEBENCH_V2_DATA_PATH", str(tmp_path))
+    monkeypatch.setenv("OPENAI_BASE_URL", endpoint + "/v1")
+    monkeypatch.setenv("OPENAI_API_KEY", "test-model-key")
+    monkeypatch.setenv("OMB_ANSWER_LLM", "openai")
+    monkeypatch.setenv("OMB_JUDGE_LLM", "openai")
+
+    user = tmp_path / "fenghaoran"
+    for source in _SOURCES:
+        path = user / source
+        path.parent.mkdir(parents=True, exist_ok=True)
+        records = (
+            {"name": "测试用户"} if source == "persona.json"
+            else [{"datetime": "2025-01-02 09:00:00", "content": "测试记录"}]
+        )
+        if source == "phone_data/note.json":
+            records.extend([
+                {"datetime": "2025-01-03 12:00:00", "content": "当日记忆"},
+                {"datetime": "2025-01-04 09:00:00", "content": "之后才可见"},
+                {"datetime": "2025-01-08 09:00:00", "content": "两题结束后才发生"},
+            ])
+        path.write_text(json.dumps(records, ensure_ascii=False), encoding="utf-8")
+    qa_path = user / "QA_all" / "QA.json"
+    qa_path.parent.mkdir()
+    qa_path.write_text(json.dumps([
+        {
+            "question": question, "answer": "巴黎", "question_type": ["Single_hop", "Temporal"],
+            "ask_time": day, "score_points": [{"description": "提到巴黎", "score": 1}],
+        }
+        for question, day in [("之后去了哪个城市？", "2025-01-05"), ("之前去了哪个城市？", "2025-01-03")]
+    ], ensure_ascii=False), encoding="utf-8")
+
+    with TestClient(create_app(tmp_path / "runs"), base_url="http://127.0.0.1") as client:
+        connection = {"api_url": endpoint, "api_key": "test-bearer-value"}
+        if backend == "contextbase":
+            connection["bank_id"] = "ui-bank"
+        response = client.post("/api/runs", json={
+            "name": "中文版", "backend": backend, "dataset": "lifebench-v2",
+            "split": "zh", "query_limit": 2, "connection": connection,
+        })
+        url, detail = await_result(client, response)
+        assert detail["status"] == "completed", detail["log"]
+        assert detail["summary"]["total_queries"] == 2
+        assert detail["summary"]["ingested_docs"] == len(_SOURCES) + 2
+        assert detail["progress"]["total_docs"] == len(_SOURCES) + 2
+        result = client.get(url + "/result").json()
+        assert result["mode"] == "rag" and result["accuracy"] == 1.0
+        assert [r["query"] for r in result["results"]] == ["之后去了哪个城市？", "之前去了哪个城市？"]
+        assert result["results"][0]["category_axes"] == {"题型": ["Single_hop", "Temporal"]}
+
+    content = []
+    cutoffs = []
+    for path, body in calls:
+        if path.endswith("/memories"):
+            content.extend(item["content"] for item in body["items"])
+        elif path == "/v1/memories/":
+            content.extend(message["content"] for message in body["messages"])
+            assert body["async_mode"] is False
+        elif path.endswith(("/recall", "/search/")):
+            cutoffs.append(body["query"])
+            assert any("当日记忆" in item for item in content)
+            assert any("之后才可见" in item for item in content) == ("之后" in body["query"])
+    assert cutoffs == ["之前去了哪个城市？", "之后去了哪个城市？"]
+    assert any("来源：日历" in item for item in content)
+    assert any("来源：短信" in item for item in content)
+    assert all("两题结束后才发生" not in item for item in content)
+    if backend == "hindsight-http":
+        created = [path for path, body in calls if "name" in body and path.endswith("-ufenghaoran")]
+        assert len(created) == 1
+    answer_prompt, judge_prompt, *_ = [body["messages"][0]["content"] for path, body in calls if path.endswith("/chat/completions")]
+    assert "提问日期：2025-01-03" in answer_prompt
+    assert "提到巴黎" in judge_prompt
+
+
+def test_precision_workbench_keeps_retrieval_and_attribution_errors_out_of_scores(monkeypatch, tmp_path, mock_services):
+    endpoint, _ = mock_services
+    monkeypatch.setenv("PRECISIONMEMBENCH_DATA_PATH", str(tmp_path))
+    (tmp_path / "beliefs.seed.json").write_text(json.dumps([
+        {"_id": "b-present", "user_id": "test-user", "scope": ["code"], "content": "Expected fact"},
+    ]), encoding="utf-8")
+    (tmp_path / "retrieval.cases.json").write_text(json.dumps([
+        {"caseId": query, "category": "test", "scope": ["code"], "query": query,
+         "expect": {"relevantBeliefs": {"shouldOnlyInclude": []}}}
+        for query in ("No memory?", "Precision failure", "Precision unknown source")
+    ]), encoding="utf-8")
+
+    with TestClient(create_app(tmp_path / "runs"), base_url="http://127.0.0.1") as client:
+        url, detail = await_result(client, client.post("/api/runs", json={
+            "name": "Precision failures", "backend": "contextbase", "dataset": "precisionmembench",
+            "split": "single-turn", "query_limit": None,
+            "connection": {"api_url": endpoint, "api_key": "test-bearer-value", "bank_id": "ui-bank"},
+        }))
+        assert detail["status"] == "scoring_incomplete", detail["log"]
+        assert detail["summary"]["correct"] == 1
+        assert detail["summary"]["scoring_failed_queries"] == 2
+        assert detail["summary"]["score"] is None
+        result = client.get(url + "/result").json()
+        assert result["accuracy"] is None
+        valid, retrieval_failed, unresolved = result["results"]
+        assert valid["correct"] and not valid["scoring_failed"]
+        assert retrieval_failed["scoring_failed"] and retrieval_failed["meta"]["scoring_error_stage"] == "retrieval"
+        assert unresolved["scoring_failed"] and unresolved["meta"]["scoring_error_stage"] == "attribution"
+        assert unresolved["meta"]["resolution"] == {"unresolved": 1}
+        assert unresolved["meta"]["retrieved_count"] == 1
+
+
+def test_hindsight_precision_reuses_the_legacy_shared_bank_and_propagates_recall_errors(monkeypatch, tmp_path):
+    import asyncio
+    from unittest.mock import AsyncMock
+    from memory_bench.memory.base import RetrievalError
+
+    provider = HindsightHTTPMemoryProvider()
+    store_dir = tmp_path / "precisionmembench" / "hindsight-http" / "_store" / "single-turn" / "all"
+    provider.prepare(store_dir, unit_ids={"test-user", "other-user"}, reset=False)
+    assert provider._bank_id_for("test-user") == "precisionmembench-single-turn"
+    assert provider._bank_id_for("other-user") == "precisionmembench-single-turn"
+    recall_kwargs = provider._recall_kwargs("query", "test-user", None)
+    assert recall_kwargs["tags"] == ["user:test-user"]
+    assert recall_kwargs["tags_match"] == "any_strict"
+
+    monkeypatch.setattr(provider, "_get_async_client", lambda: object())
+    monkeypatch.setattr(provider, "_needs_http_recall", lambda _: True)
+    monkeypatch.setattr("memory_bench.memory.hindsight.asyncio.sleep", AsyncMock())
+    for error, attempts in [(TimeoutError(), 1), (RuntimeError("Recall failed"), 5)]:
+        recall = AsyncMock(side_effect=error)
+        monkeypatch.setattr(provider, "_arecall_http", recall)
+        with pytest.raises(RetrievalError, match="Hindsight Recall"):
+            asyncio.run(provider.async_retrieve("query", user_id="test-user"))
+        assert recall.await_count == attempts
+
+
+def test_bm25_lifebench_batches_append_within_a_user_and_reset_for_the_next():
+    import asyncio
+    from memory_bench.memory.bm25 import BM25MemoryProvider
+
+    provider = BM25MemoryProvider()
+    asyncio.run(provider.async_ingest_increment([Document("early", "an earlier fact", user_id="alice")], first=True))
+    asyncio.run(provider.async_ingest_increment([Document("late", "a later fact", user_id="alice")], first=False))
+    results, _ = provider.retrieve("fact", user_id="alice")
+    assert {doc.id for doc in results} == {"early", "late"}
+
+    asyncio.run(provider.async_ingest_increment([Document("other", "a different fact", user_id="bob")], first=True))
+    results, _ = provider.retrieve("fact", user_id="bob")
+    assert {doc.id for doc in results} == {"other"}

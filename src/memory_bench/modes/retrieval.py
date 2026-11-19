@@ -1,7 +1,7 @@
 import time
 
 from .base import ResponseMode
-from ..memory.base import MemoryProvider
+from ..memory.base import MemoryProvider, RetrievalError
 from ..models import AnswerResult
 
 
@@ -31,20 +31,25 @@ class RetrievalMode(ResponseMode):
     async def async_answer(self, query: str, memory: MemoryProvider, task_type: str = "open",
                            user_id: str | None = None, meta: dict | None = None) -> AnswerResult:
         meta = meta or {}
-        k = int(meta.get("retrieval_limit") or 20)
+        limit = meta.get("retrieval_limit")
+        k = 20 if limit is None else int(limit)
         filters = meta.get("retrieval_filter") if getattr(memory, "supports_filters", False) else None
-        if not (query or "").strip():
-            # Nothing to retrieve for. Providers reject an empty query outright, and a
-            # dataset that ships blank-query cases means them to return nothing.
+        if k <= 0 or not (query or "").strip():
+            # Both a zero budget and a blank query mean no search is needed.
             return AnswerResult(
                 answer="0 memories retrieved", reasoning="",
                 context="## Retrieved memories (0)", retrieve_time_ms=0.0,
                 raw_response={"documents": [], "provider_raw": None},
             )
         t0 = time.perf_counter()
-        docs, raw = await memory.async_retrieve(
-            query, k=k, user_id=user_id, query_timestamp=meta.get("query_timestamp"), filters=filters
-        )
+        try:
+            docs, raw = await memory.async_retrieve(
+                query, k=k, user_id=user_id, query_timestamp=meta.get("query_timestamp"), filters=filters
+            )
+        except RetrievalError:
+            raise
+        except Exception as exc:
+            raise RetrievalError(f"{memory.name} retrieval failed ({type(exc).__name__})") from exc
         retrieve_ms = (time.perf_counter() - t0) * 1000
 
         lines = [f"## Retrieved memories ({len(docs)})"]

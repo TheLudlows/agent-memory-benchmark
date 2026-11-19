@@ -65,8 +65,9 @@ from pathlib import Path
 from rich.console import Console
 from rich.table import Table
 
-from ._cache import dataset_cache_dir
+from ._cache import dataset_cache_dir, staging_file
 from .base import Dataset
+from ..judge import ScoringError
 from ..models import Document, Query
 
 _COMMIT = "b95d6abb471c0d591c440172283dd74e7af000df"
@@ -77,6 +78,7 @@ _FIXTURES = {
 }
 
 SPLITS = ["single-turn"]
+TOTAL_QUERIES = 77
 
 DEFAULT_USER_ID = "test-user"
 
@@ -208,7 +210,8 @@ class PrecisionMemBenchDataset(Dataset):
     description = "Belief-level retrieval precision: 77 cases asserting exactly which memories must and must not surface."
     splits = SPLITS
     task_type = "retrieval"
-    isolation_unit = None  # per-user scoping is done by the provider's user_id filter
+    isolation_unit = "user"
+    ingest_all_before_queries = True  # Keep the other-user fixture present even in sample runs.
     links = [
         {"label": "Paper", "url": "https://arxiv.org/abs/2605.11325"},
         {"label": "GitHub", "url": "https://github.com/tenurehq/precisionmembench"},
@@ -224,13 +227,16 @@ class PrecisionMemBenchDataset(Dataset):
         if filename in self._cache:
             return self._cache[filename]
         env = os.environ.get("PRECISIONMEMBENCH_DATA_PATH")
-        path = Path(env) / filename if env else dataset_cache_dir(self.name) / filename
+        path = Path(env).expanduser() / filename if env else dataset_cache_dir(self.name) / filename
         if not path.exists():
             if env:
                 raise FileNotFoundError(f"PRECISIONMEMBENCH_DATA_PATH set but {path} is missing")
             Console().print(f"[dim]Downloading {filename} from upstream @ {_COMMIT[:7]}...[/dim]")
-            urllib.request.urlretrieve(_FIXTURES[filename], path)
-        data = json.loads(path.read_text())
+            with staging_file(path) as temporary:
+                urllib.request.urlretrieve(_FIXTURES[filename], temporary)
+                data = json.loads(temporary.read_text(encoding="utf-8"))
+        else:
+            data = json.loads(path.read_text(encoding="utf-8"))
         self._cache[filename] = data
         return data
 
@@ -534,6 +540,10 @@ class PrecisionMemBenchDataset(Dataset):
             searched, resolution = self._resolve_belief_ids(retrieved)
         else:
             searched, resolution = [], {}
+
+        if unresolved := resolution.get("unresolved", 0):
+            meta.update(resolution=resolution, retrieved_count=len(retrieved))
+            raise ScoringError(f"Cannot resolve the source IDs of {unresolved} retrieved memories")
 
         # Optional client-side return cap: hand back only the top N distinct beliefs,
         # the way gbrain's `adaptiveReturn` gate does (its headline 0.582 row is N=1).

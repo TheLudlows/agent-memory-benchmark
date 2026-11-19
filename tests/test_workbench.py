@@ -6,6 +6,7 @@ import time
 from dataclasses import asdict
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from types import SimpleNamespace
 from zipfile import ZipFile
 
 import pytest
@@ -186,14 +187,9 @@ def test_datasets_run_through_local_api_and_worker(monkeypatch, tmp_path, mock_s
         assert set(config["datasets"]) == {case[0] for case in fixtures}
         assert set(config["backends"]) == {"contextbase", "mem0-cloud", "hindsight-http"}
         assert config["backends"]["contextbase"]["missing"] == ["API 地址", "API Key", "Bank ID"]
-        response = client.post("/api/connections/contextbase", json={
-            "api_url": endpoint + "/default", "api_key": "default-key", "bank_id": "default-bank",
-        })
-        assert response.status_code == 200, response.text
-        assert response.json()["missing"] == []
-        assert "default-key" not in response.text
 
         connection = {"api_url": endpoint, "api_key": "test-bearer-value", "bank_id": "ui-bank"}
+        reused = {"api_url": endpoint, "bank_id": "ui-bank", "use_saved_key": True}
         saved_fingerprints = {}
         document_fingerprints = {}
         for dataset, split, variable, data in fixtures:
@@ -206,12 +202,15 @@ def test_datasets_run_through_local_api_and_worker(monkeypatch, tmp_path, mock_s
             assert count_response.json() == {"query_count": question_count}
             selection = {
                 "name": f"{dataset} baseline", "dataset": dataset, "split": split,
-                "backend": "contextbase", "query_limit": None, "connection": connection,
+                "backend": "contextbase", "query_limit": None,
+                "connection": connection if dataset == "locomo" else reused,
             }
             assert client.post("/api/runs", json={**selection, "split": "../invalid"}).status_code == 422
             assert client.post("/api/runs", json=selection, headers={"Origin": "https://elsewhere.test"}).status_code == 403
             response = client.post("/api/runs", json=selection)
             assert response.status_code == 201, response.text
+            assert response.json()["backend_config"]["has_key"]
+            assert "test-bearer-value" not in response.text
             assert client.post("/api/runs", json=selection).status_code == 409
             detail_url, detail = await_result(client, response)
             assert detail["status"] == "completed", detail["log"]
@@ -268,7 +267,7 @@ def test_datasets_run_through_local_api_and_worker(monkeypatch, tmp_path, mock_s
         assert detail["summary"]["question_fingerprint"] == saved_fingerprints["beam"]
         assert detail["summary"]["document_fingerprint"] != document_fingerprints["beam"]
         assert len(set(saved_fingerprints.values())) == len(fixtures)
-        assert client.get("/api/config").json()["backends"]["contextbase"]["api_url"] == endpoint + "/default"
+        assert client.get("/api/config").json()["backends"]["contextbase"]["api_url"] == endpoint
         result = client.get(detail_url + "/result").json()
         assert result["accuracy"] is None and result["scoring_failed_queries"] == 3
         rows = result["results"]
@@ -460,52 +459,72 @@ def test_beam_can_rejudge_a_legacy_empty_context_abstention(monkeypatch, tmp_pat
     assert summary.results[0].correct
 
 
-def test_workbench_connections_can_be_saved_and_reset(monkeypatch, tmp_path, private_workbench_config):
+def test_workbench_remembers_connections_by_backend_and_url(monkeypatch, tmp_path, private_workbench_config):
     monkeypatch.setenv("HINDSIGHT_HTTP_URL", "http://127.0.0.1:8888/")
     monkeypatch.setenv("HINDSIGHT_HTTP_KEY", "environment-secret")
-    monkeypatch.delenv("MEM0_CLOUD_KEY", raising=False)
-    monkeypatch.delenv("MEM0_API_KEY", raising=False)
-    monkeypatch.delenv("MEM0_CLOUD_URL", raising=False)
+    monkeypatch.setenv("CONTEXTBASE_API_URL", "https://env.example/context")
+    monkeypatch.setenv("CONTEXTBASE_API_TOKEN", "context-environment-secret")
+    monkeypatch.setenv("CONTEXTBASE_BANK_ID", "environment-bank")
+    monkeypatch.setenv("OMB_ANSWER_LLM", "gemini")
+    monkeypatch.setenv("OMB_JUDGE_LLM", "gemini")
+    monkeypatch.setenv("GEMINI_API_KEY", "model-test-key")
     directory = tmp_path / "runs"
+    environments = []
+    first = "https://service.example/a"
+    second = "https://service.example/b"
+    selection = {"name": "Connection history", "dataset": "locomo", "split": "locomo10"}
+
+    def launch(*_, env, **__):
+        environments.append(env)
+        return SimpleNamespace(stdout=io.StringIO(), wait=lambda timeout=None: 0, poll=lambda: 0)
+
+    monkeypatch.setattr("memory_bench.workbench.subprocess.Popen", launch)
+
+    def start(client, backend, connection):
+        response = client.post("/api/runs", json={**selection, "backend": backend, "connection": connection})
+        _, detail = await_result(client, response)
+        assert detail["status"] == "completed"
+        assert "backend_config" not in detail
+        return response.json()["backend_config"]
 
     with TestClient(create_app(directory), base_url="http://127.0.0.1") as client:
         config = client.get("/api/config")
         assert "environment-secret" not in config.text
         assert config.json()["backends"]["hindsight-http"]["has_key"]
-        assert config.json()["backends"]["mem0-cloud"]["api_url"] == "https://api.mem0.ai"
+        saved = start(client, "contextbase", {"api_url": first + "/", "api_key": "context-a-secret", "bank_id": "bank-a"})
+        assert saved["api_url"] == first and saved["has_key"]
+        assert environments[-1]["CONTEXTBASE_API_TOKEN"] == "context-a-secret"
+        saved = start(client, "contextbase", {"api_url": second, "api_key": "context-b-secret", "bank_id": "bank-b"})
+        assert [(item["api_url"], item["bank_id"]) for item in saved["connections"]] == [
+            (second, "bank-b"), (first, "bank-a"), ("https://env.example/context", "environment-bank"),
+        ]
+        start(client, "mem0-cloud", {"api_url": first, "api_key": "mem0-private-key"})
+        assert environments[-1]["MEM0_CLOUD_KEY"] == "mem0-private-key"
 
-        config_path = "/api/connections/hindsight-http"
-        changed_url = {"api_url": "http://127.0.0.1:9250"}
-        assert client.post(config_path, json=changed_url).status_code == 422
-        response = client.post(config_path, json={**changed_url, "clear_key": True})
-        assert response.status_code == 200
-        assert response.json()["has_key"] is False
-        response = client.post(config_path, json={**changed_url, "api_key": "new-hindsight-secret"})
-        assert response.status_code == 200 and response.json()["has_key"]
-        assert "new-hindsight-secret" not in response.text
-
-        mem0_path = "/api/connections/mem0-cloud"
-        mem0 = {"api_url": "https://example.test/mem0", "api_key": "mem0-private-token"}
-        blocked = client.post(mem0_path, json=mem0, headers={"Origin": "https://elsewhere.example"})
-        assert blocked.status_code == 403
-        invalid = client.post(mem0_path, json={**mem0, "api_key": {"secret": mem0["api_key"]}})
-        assert invalid.status_code == 422 and mem0["api_key"] not in invalid.text
-        invalid = client.post(mem0_path, json={**mem0, "api_url": "https://example.test/?key=key-in-url"})
-        assert invalid.status_code == 422 and "key-in-url" not in invalid.text
-        saved = client.post(mem0_path, json=mem0)
-        assert saved.status_code == 200 and saved.json()["has_key"]
-        assert mem0["api_key"] not in saved.text
+        saved = start(client, "hindsight-http", {"api_url": "http://127.0.0.1:9250"})
+        assert not saved["has_key"] and environments[-1]["HINDSIGHT_HTTP_KEY"] == ""
+        assert saved["connections"][1]["api_url"] == "http://127.0.0.1:8888"
+        assert saved["connections"][1]["has_key"]
 
     with TestClient(create_app(directory), base_url="http://127.0.0.1") as client:
-        backends = client.get("/api/config").json()["backends"]
-        assert backends["mem0-cloud"]["api_url"] == "https://example.test/mem0"
-        assert backends["mem0-cloud"]["has_key"]
-        assert backends["hindsight-http"]["api_url"] == "http://127.0.0.1:9250"
-        reset = client.post(config_path + "/reset").json()
-        assert reset["api_url"] == "http://127.0.0.1:8888" and not reset["saved"]
-        assert reset["has_key"]
+        config = client.get("/api/config")
+        assert config.json()["backends"]["contextbase"]["api_url"] == second
+        effective = {"api_url": first, "bank_id": "bank-a", "use_saved_key": True}
+        saved = start(client, "contextbase", effective)
+        assert saved["api_url"] == first
+        assert environments[-1]["CONTEXTBASE_API_TOKEN"] == "context-a-secret"
+        assert environments[-1]["CONTEXTBASE_BANK_ID"] == "bank-a"
+        start(client, "mem0-cloud", {"api_url": first, "use_saved_key": True})
+        assert environments[-1]["MEM0_CLOUD_KEY"] == "mem0-private-key"
+        saved = start(client, "contextbase", {"api_url": first + "/", "api_key": "rotated-secret", "bank_id": "bank-updated"})
+        assert [item["api_url"] for item in saved["connections"]] == [first, second, "https://env.example/context"]
+        assert saved["bank_id"] == "bank-updated"
+        assert client.get("/api/config").json()["backends"]["contextbase"] == saved
+        history = client.get("/api/runs").text
+        for key in ("environment-secret", "context-a-secret", "context-b-secret", "mem0-private-key", "rotated-secret"):
+            assert key not in config.text and key not in history and key not in json.dumps(saved)
         storage, = private_workbench_config.glob("*/connections.json")
-        assert "new-hindsight-secret" not in storage.read_text(encoding="utf-8")
+        assert json.loads(storage.read_text(encoding="utf-8"))["contextbase"][0]["api_key"] == "rotated-secret"
         assert not (directory / ".connections.json").exists()
 
 
@@ -625,7 +644,7 @@ def test_workbench_migrates_legacy_credentials_out_of_results(tmp_path, private_
         assert key not in config.text
     assert not legacy.exists()
     private, = private_workbench_config.glob("*/connections.json")
-    assert json.loads(private.read_text(encoding="utf-8"))["contextbase"]["api_key"] == key
+    assert json.loads(private.read_text(encoding="utf-8"))["contextbase"][0]["api_key"] == key
 
     archive = io.BytesIO()
     with ZipFile(archive, "w") as exported:
@@ -635,6 +654,13 @@ def test_workbench_migrates_legacy_credentials_out_of_results(tmp_path, private_
     with ZipFile(archive) as exported:
         assert all(key.encode() not in exported.read(name) for name in exported.namelist())
 
+    with TestClient(create_app(results), base_url="http://127.0.0.1") as restarted:
+        assert restarted.get("/api/config").json()["backends"]["contextbase"] == saved
+
+    # Existing private settings from before address history remain selectable.
+    private.write_text(json.dumps({"contextbase": {
+        "api_url": "https://example.test", "api_key": key, "bank_id": "test-bank",
+    }}), encoding="utf-8")
     with TestClient(create_app(results), base_url="http://127.0.0.1") as restarted:
         assert restarted.get("/api/config").json()["backends"]["contextbase"] == saved
 

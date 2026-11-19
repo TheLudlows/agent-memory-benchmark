@@ -32,22 +32,15 @@ BACKENDS: dict[BackendId, Backend] = {
 }
 
 
-class ConnectionInput(BaseModel):
+class RunConnection(BaseModel):
     model_config = ConfigDict(extra="forbid")
     api_url: str = Field(max_length=2048)
     api_key: SecretStr | None = Field(default=None, max_length=4096)
     bank_id: str = Field(default="", max_length=256)
+    use_saved_key: bool = False
 
     def supplied_key(self) -> str:
         return clean_api_key(self.api_key)
-
-
-class ConnectionUpdate(ConnectionInput):
-    clear_key: bool = False
-
-
-class RunConnection(ConnectionInput):
-    use_saved_key: bool = False
 
 
 def clean_api_key(value: SecretStr | None) -> str:
@@ -80,6 +73,12 @@ class Connection:
     api_key: str = field(default="", repr=False)
     bank_id: str = ""
     bank_mapping: str = ""
+
+    def public(self) -> dict:
+        return {
+            "api_url": self.api_url, "bank_id": self.bank_id,
+            "has_bank_mapping": bool(self.bank_mapping), "has_key": bool(self.api_key),
+        }
 
     def missing(self, backend: BackendId) -> list[str]:
         missing = []
@@ -135,82 +134,81 @@ class Connections:
         self.lock = Lock()
         self.saved = self._load(path)
         if legacy_path is not None and legacy_path.exists():
-            self._write({**self._load(legacy_path), **self.saved})
+            for backend, entries in self._load(legacy_path).items():
+                recent = self.saved.setdefault(backend, {})
+                for url, connection in entries.items():
+                    recent.setdefault(url, connection)
+            self._write(self.saved)
             legacy_path.unlink()
 
     @staticmethod
-    def _load(path: Path) -> dict[BackendId, Connection]:
+    def _load(path: Path) -> dict[BackendId, dict[str, Connection]]:
         try:
             raw = json.loads(path.read_text(encoding="utf-8"))
         except FileNotFoundError:
             return {}
-        return {backend: Connection(**raw[backend]) for backend in BACKENDS if backend in raw}
-
-    def _get(self, backend: BackendId) -> Connection:
-        return self.saved.get(backend) or _environment_connection(backend)
+        history = {}
+        for backend in BACKENDS:
+            entries = raw.get(backend, [])
+            # The previous format stored one connection object per backend.
+            if isinstance(entries, dict):
+                entries = [entries]
+            if entries:
+                history[backend] = {entry["api_url"]: Connection(**entry) for entry in entries}
+        return history
 
     def _public(self, backend: BackendId) -> dict:
-        connection = self._get(backend)
+        saved = self.saved.get(backend, {})
+        environment = _environment_connection(backend)
+        entries = list(saved.values())
+        if environment.api_url and environment.api_url not in saved:
+            entries.append(environment)
+        default = entries[0] if entries else environment
         spec = BACKENDS[backend]
         return {
-            "label": spec.label, "api_url": connection.api_url, "bank_id": connection.bank_id,
-            "has_bank_mapping": bool(connection.bank_mapping), "has_key": bool(connection.api_key),
-            "key_optional": spec.key_optional, "saved": backend in self.saved,
-            "missing": connection.missing(backend),
+            **default.public(), "label": spec.label, "key_optional": spec.key_optional,
+            "saved": bool(saved), "missing": default.missing(backend),
+            "connections": [connection.public() for connection in entries],
         }
 
     def public(self) -> dict:
         with self.lock:
             return {backend: self._public(backend) for backend in BACKENDS}
 
-    def _write(self, connections: dict[BackendId, Connection]) -> None:
-        write_private_json(self.path, {name: asdict(connection) for name, connection in connections.items()})
+    def _write(self, connections: dict[BackendId, dict[str, Connection]]) -> None:
+        write_private_json(self.path, {
+            backend: [asdict(connection) for connection in history.values()]
+            for backend, history in connections.items()
+        })
         self.saved = connections
 
-    def save(self, backend: BackendId, update: ConnectionUpdate) -> dict:
-        api_url = validate_api_url(update.api_url)
-        supplied_key = update.supplied_key()
-        if update.clear_key and (not BACKENDS[backend].key_optional or supplied_key):
-            raise ValueError("只有 Hindsight 可以清除 Key，清除时请留空 Key 输入框。")
-
+    def remember(self, backend: BackendId, connection: Connection) -> dict:
+        url = connection.api_url
         with self.lock:
-            current = self._get(backend)
-            same_url = api_url == current.api_url
-            if not same_url and current.api_key and not supplied_key and not update.clear_key:
-                raise ValueError("API 地址已变更，请重新填写 API Key。若 Hindsight 无需鉴权，可清除已保存的 Key。")
-            if backend != "contextbase" and update.bank_id:
-                raise ValueError("只有 ContextBase 需要 Bank ID。")
-            bank_id = update.bank_id.strip()
-            mapping = current.bank_mapping if not bank_id and same_url else ""
-            key = "" if update.clear_key else supplied_key or (current.api_key if same_url else "")
-            connection = Connection(api_url, key, bank_id, mapping)
-            if missing := connection.missing(backend):
-                raise ValueError("请填写 " + "、".join(missing))
-            self._write({**self.saved, backend: connection})
-            return self._public(backend)
-
-    def reset(self, backend: BackendId) -> dict:
-        with self.lock:
-            if backend in self.saved:
-                self._write({name: value for name, value in self.saved.items() if name != backend})
+            recent = {url: connection}
+            for address, saved in self.saved.get(backend, {}).items():
+                recent.setdefault(address, saved)
+            self._write({**self.saved, backend: recent})
             return self._public(backend)
 
     def for_run(self, backend: BackendId, request: RunConnection) -> Connection:
         api_url = validate_api_url(request.api_url)
         key = request.supplied_key()
         with self.lock:
-            current = self._get(backend)
-        same_url = api_url == current.api_url
+            current = self.saved.get(backend, {}).get(api_url)
+        if current is None:
+            environment = _environment_connection(backend)
+            current = environment if environment.api_url == api_url else Connection(api_url)
         if request.use_saved_key:
             if key:
                 raise ValueError("请输入本轮 Key 或选择使用已保存的 Key。")
-            if not same_url or not current.api_key:
+            if not current.api_key:
                 raise ValueError("已保存的 Key 仅可用于对应的 API 地址。请填写本轮 Key。")
             key = current.api_key
         if backend != "contextbase" and request.bank_id:
             raise ValueError("只有 ContextBase 需要 Bank ID。")
         bank_id = request.bank_id.strip()
-        mapping = current.bank_mapping if not bank_id and same_url else ""
+        mapping = current.bank_mapping if not bank_id else ""
         connection = Connection(api_url, key, bank_id, mapping)
         if missing := connection.missing(backend):
             raise ValueError("请填写本轮评测的 " + "、".join(missing))

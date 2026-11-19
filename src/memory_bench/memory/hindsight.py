@@ -2,9 +2,10 @@ import asyncio
 import os
 import time
 from pathlib import Path
+from uuid import uuid4
 
 from ..models import Document
-from .base import MemoryProvider
+from .base import MemoryProvider, RetrievalError
 
 # Workaround: hindsight-client passes async_= but the model expects var_async=
 # This monkey-patch fixes RetainRequest so async_=True actually works.
@@ -194,7 +195,9 @@ class _HindsightBase(MemoryProvider):
 
     def prepare(self, store_dir: Path, unit_ids: set[str] | None = None, reset: bool = True) -> None:
         self._bank_id, self._dataset, self._category = _bank_id_from_store_dir(store_dir)
-        self._per_unit = unit_ids is not None
+        # PrecisionMemBench already uses a shared Bank scoped by strict user tags.
+        # Keep that layout so CLI runs can reuse data ingested before Workbench support.
+        self._per_unit = unit_ids is not None and self._dataset != "precisionmembench"
 
     def set_extraction_labels(self, labels: list[dict] | None) -> None:
         """Controlled vocabularies the extraction LLM should classify each fact against.
@@ -447,9 +450,11 @@ class _HindsightBase(MemoryProvider):
 
     # ── Bank creation (async) ─────────────────────────────────────────────────
 
-    async def _acreate_bank(self, client, bank_id: str) -> None:
+    async def _acreate_bank(self, client, bank_id: str, *, resume: bool | None = None) -> None:
+        if resume is None:
+            resume = self._resume
         kwargs = self._bank_kwargs(bank_id=bank_id)
-        if not self._resume:
+        if not resume:
             try:
                 await client.adelete_bank(bank_id=bank_id)
             except Exception:
@@ -457,7 +462,7 @@ class _HindsightBase(MemoryProvider):
         try:
             await client.acreate_bank(bank_id=bank_id, name=f"Benchmark Bank ({bank_id})", **kwargs)
         except Exception:
-            if not self._resume:
+            if not resume:
                 raise  # under AMB_RESUME the bank usually already exists
         await self._aapply_extraction_labels(client, bank_id)
 
@@ -894,7 +899,10 @@ class _HindsightBase(MemoryProvider):
                 headers=headers, json=body,
             )
             r.raise_for_status()
-            return _as_recall_response(r.json())
+            payload = r.json()
+            if self._dataset == "precisionmembench" and not isinstance(payload.get("results"), list):
+                raise ValueError("Hindsight Recall response is missing a result list")
+            return _as_recall_response(payload)
 
     # ── Sync retrieve ─────────────────────────────────────────────────────────
 
@@ -1063,6 +1071,7 @@ class HindsightCloudMemoryProvider(_HindsightBase):
     name = "hindsight-cloud"
     description = "Hindsight hosted cloud API. Recall uses all memory types (world + experience + observation) with no type filter applied."
     kind = "cloud"
+    supports_incremental_ingest = True
     provider = "hindsight"
     variant = "cloud"
 
@@ -1072,6 +1081,12 @@ class HindsightCloudMemoryProvider(_HindsightBase):
         self._cloud_api_key = os.environ["HINDSIGHT_CLOUD_KEY"]
         self._cloud_base_url = os.environ.get("HINDSIGHT_CLOUD_URL", "https://api.hindsight.vectorize.io")
         self._client = HindsightClient(base_url=self._cloud_base_url, api_key=self._cloud_api_key)
+
+    def prepare(self, store_dir: Path, unit_ids: set[str] | None = None, reset: bool = True) -> None:
+        super().prepare(store_dir, unit_ids, reset)
+        if self._dataset == "lifebench-v2" and not getattr(self, "_bank_prefix", ""):
+            # Earlier CLI runs may contain records beyond the next run's first question date.
+            self._bank_id = f"amb-temporal-{uuid4().hex[:16]}-{self._bank_id}"
 
     def ingest(self, documents: list[Document]) -> None:
         """Sync entry point used by the runner's batch (non-isolated) path.
@@ -1095,10 +1110,16 @@ class HindsightCloudMemoryProvider(_HindsightBase):
         return self._async_client
 
     async def async_ingest(self, documents: list[Document]) -> None:
+        await self._async_ingest(documents, append=False, resume=self._resume)
+
+    async def async_ingest_increment(self, documents: list[Document], *, first: bool) -> None:
+        await self._async_ingest(documents, append=not first, resume=False)
+
+    async def _async_ingest(self, documents: list[Document], *, append: bool, resume: bool) -> None:
         client = self._get_async_client()
 
-        if not self._per_unit:
-            await self._acreate_bank(client, self._bank_id)
+        if not self._per_unit and not append:
+            await self._acreate_bank(client, self._bank_id, resume=resume)
 
         _BATCH_SIZE = 20
         # Cap how deep the server-side queue is allowed to get. Submitting all batches at
@@ -1150,10 +1171,10 @@ class HindsightCloudMemoryProvider(_HindsightBase):
 
         for doc in documents:
             bank_id = self._bank_id_for(doc.user_id)
-            if self._per_unit and bank_id not in created:
-                await self._acreate_bank(client, bank_id)
+            if self._per_unit and not append and bank_id not in created:
+                await self._acreate_bank(client, bank_id, resume=resume)
                 created.add(bank_id)
-                if self._resume:
+                if resume:
                     self._stale_failed_ops[bank_id] = await self._snapshot_failed_ops(client, bank_id)
                     if self._stale_failed_ops[bank_id]:
                         _log.info(f"Bank {bank_id}: ignoring {len(self._stale_failed_ops[bank_id])} "
@@ -1206,10 +1227,16 @@ class HindsightCloudMemoryProvider(_HindsightBase):
                     _call2 = self._arecall_http(_kw2) if self._needs_http_recall(_kw2) else client.arecall(**_kw2)
                     response = await asyncio.wait_for(_call2, timeout=300)
                 break
-            except asyncio.TimeoutError:
+            except asyncio.TimeoutError as exc:
+                if self._dataset == "precisionmembench":
+                    raise RetrievalError("Hindsight Recall timed out") from exc
                 _log.warning(f"async_retrieve timed out for query={query[:60]!r}")
                 return [], None
             except Exception as e:
+                if self._dataset == "precisionmembench":
+                    status = getattr(getattr(e, "response", None), "status_code", None) or getattr(e, "status", None)
+                    if attempt == 4 or status in {400, 401, 403, 404, 422}:
+                        raise RetrievalError(f"Hindsight Recall failed ({status or type(e).__name__})") from e
                 if attempt == 4:
                     _log.error(f"async_retrieve failed after 5 attempts ({e.__class__.__name__}) "
                                f"for query={query[:60]!r} — returning empty context")

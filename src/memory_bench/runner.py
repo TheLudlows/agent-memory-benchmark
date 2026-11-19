@@ -2,8 +2,10 @@ import asyncio
 import json
 import logging
 import time
+from bisect import bisect_right
 from collections.abc import Callable, Iterable
 from dataclasses import asdict, dataclass, fields
+from itertools import groupby
 from pathlib import Path
 from uuid import uuid4
 
@@ -21,9 +23,9 @@ logger = logging.getLogger(__name__)
 from .dataset.base import Dataset
 from .judge import GeminiJudge, ScoringError
 from .llm.base import LLM
-from .memory.base import MemoryProvider
+from .memory.base import MemoryProvider, RetrievalError
 from .modes.base import ResponseMode
-from .models import Document, EvalSummary, QueryResult
+from .models import AnswerResult, Document, EvalSummary, Query, QueryResult
 
 console = Console()
 
@@ -38,6 +40,25 @@ def _score_mcq(answer: str, gold_answers: list[str]) -> tuple[bool, str]:
         if norm(gold) == answer_letter:
             return True, "letter match"
     return False, f"expected one of {gold_answers!r}, got {answer!r}"
+
+
+def _query_time_batches(
+    documents: list[Document], queries: list[Query],
+) -> list[tuple[list[Document], list[tuple[int, Query]]]]:
+    """Schedule each document once, before the first query that can see it."""
+    documents = sorted(documents, key=lambda doc: doc.timestamp or "")
+    timestamps = [doc.timestamp or "" for doc in documents]
+
+    def cutoff(row: tuple[int, Query]) -> str:
+        return row[1].meta["query_timestamp"]
+
+    batches = []
+    start = 0
+    for timestamp, rows in groupby(sorted(enumerate(queries), key=cutoff), key=cutoff):
+        end = bisect_right(timestamps, timestamp, lo=start)
+        batches.append((documents[start:end], list(rows)))
+        start = end
+    return batches
 
 
 @dataclass(frozen=True)
@@ -104,6 +125,14 @@ class EvalRunner:
         if oracle and not dataset.supports_oracle():
             raise ValueError(f"Dataset '{dataset.name}' does not support oracle mode (no gold_ids)")
 
+        if dataset.query_timestamp_cutoff:
+            if not memory.supports_incremental_ingest:
+                raise ValueError(f"{memory.name} cannot ingest {dataset.name} incrementally by query date.")
+            if skip_ingestion or skip_retrieval or skip_answer:
+                raise ValueError(f"{dataset.name} requires a fresh history for each run to enforce the query date.")
+        if task_type == "retrieval" and (skip_retrieval or skip_answer):
+            raise ValueError("Retrieval benchmarks require fresh search results with source IDs.")
+
         use_cached_results = only_failed or skip_ingested or skip_retrieval or skip_answer
         previous = self._load_previous(dataset.name, split, effective_name, mode.name) if skip_ingestion or use_cached_results else {}
         if memory.ingestion_run_id and (use_cached_results or skip_ingestion):
@@ -160,6 +189,7 @@ class EvalRunner:
             queries = [q for q in queries if str(q.user_id) == str(unit)]
             console.print(f"  filtered to unit {unit}: {len(queries)} queries [dim](--unit)[/dim]")
 
+        run_units_separately = dataset.isolation_unit is not None and not dataset.ingest_all_before_queries
         console.print("[dim]Loading documents...[/dim]")
         if oracle:
             gold_ids = {gid for q in queries for gid in q.gold_ids}
@@ -167,7 +197,7 @@ class EvalRunner:
                 raise ValueError("Oracle mode requested but no gold_ids found in queries")
             documents = dataset.load_documents(split, category=doc_category, ids=gold_ids)
             console.print(f"  {len(documents)} gold documents loaded [dim](oracle mode)[/dim]")
-        elif dataset.isolation_unit is not None and (query_limit is not None or unit is not None or query_id):
+        elif run_units_separately and (query_limit is not None or unit is not None or query_id):
             # For isolated datasets narrowed to some queries (--query-limit, --unit, --query-id), load
             # only the queried units' documents. --query-id used to fall through to the full load,
             # so prepare() reset every unit's storage (on hindsight-coding: deleted every bank) to
@@ -196,7 +226,7 @@ class EvalRunner:
         if skip_ingestion and not (skip_retrieval or skip_answer):
             requested_units = {q.user_id for q in queries}
             memory.validate_ingestion([
-                doc for doc in documents if unit_ids is None or dataset.get_isolation_id(doc) in requested_units
+                doc for doc in documents if not run_units_separately or dataset.get_isolation_id(doc) in requested_units
             ])
 
         stored_contexts: dict[str, str] = {}
@@ -235,8 +265,8 @@ class EvalRunner:
             rf = dataset.retrieval_filter(q)
             if rf is not None:
                 meta["retrieval_filter"] = rf
+            retrieval_error = None
             if skip_answer:
-                from .models import AnswerResult
                 ctx = stored_contexts.get(q.id, "")
                 ans = stored_answers.get(q.id, "")
                 answer_result = AnswerResult(answer=ans, reasoning="", context=ctx, retrieve_time_ms=0.0)
@@ -244,7 +274,14 @@ class EvalRunner:
                 ctx = stored_contexts.get(q.id, "")
                 answer_result = await asyncio.to_thread(mode.answer_from_context, q.query, ctx, task_type, meta)
             else:
-                answer_result = await mode.async_answer(q.query, memory, task_type=task_type, user_id=q.user_id, meta=meta)
+                try:
+                    answer_result = await mode.async_answer(q.query, memory, task_type=task_type, user_id=q.user_id, meta=meta)
+                except RetrievalError as exc:
+                    retrieval_error = str(exc)
+                    q.meta["scoring_error_stage"] = "retrieval"
+                    answer_result = AnswerResult(
+                        answer="", reasoning="", context="", retrieve_time_ms=(time.perf_counter() - t_start) * 1000,
+                    )
             logger.info("[query:%s] answer done in %.1fs (retrieve=%.0fms)", q.id, time.perf_counter() - t_start, answer_result.retrieve_time_ms)
             # raw_response is not stored; a provider that measures the answer (cost, tokens) hands
             # those numbers over under "meta", and they land in the row's meta.
@@ -253,7 +290,9 @@ class EvalRunner:
             score: float | None = None
             scoring_failed = False
             coding_trajectory = coding_git_history = None
-            if task_type == "coding":
+            if retrieval_error is not None:
+                correct, judge_reason, scoring_failed = False, retrieval_error, True
+            elif task_type == "coding":
                 # The CodingMode already built the repo, ran the agent (with interventions), and graded
                 # by pytest. Correctness is solve-ness, not a judged answer; carry the metrics through.
                 raw = answer_result.raw_response or {}
@@ -279,8 +318,13 @@ class EvalRunner:
                 # A ranked dataset (knowledge banks) also returns a continuous score — its
                 # nDCG@10 or recall@10 — which then becomes the headline number.
                 docs = (answer_result.raw_response or {}).get("documents") or []
-                correct, judge_reason, *ranked_score = dataset.score_retrieval(q, docs)
-                score = float(ranked_score[0]) if ranked_score else None
+                try:
+                    correct, judge_reason, *ranked_score = dataset.score_retrieval(q, docs)
+                except ScoringError as exc:
+                    correct, judge_reason, scoring_failed = False, str(exc), True
+                    q.meta["scoring_error_stage"] = "attribution"
+                else:
+                    score = float(ranked_score[0]) if ranked_score else None
             elif not answer_result.context and not dataset.should_judge_empty_context(q.meta):
                 correct, judge_reason = False, _EMPTY_CONTEXT_REASON
                 if hasattr(dataset, "score_result"):
@@ -370,7 +414,7 @@ class EvalRunner:
                     stage = "evaluating"
             self.on_progress(EvaluationProgress(stage, completed, len(queries), ingested_for_run, total_docs))
 
-        if dataset.isolation_unit is not None:
+        if run_units_separately:
             # Unit-sequential mode: ingest one unit's document then answer all its queries
             # before moving to the next unit. This matches the original AMA-bench setup and
             # gives natural per-unit isolation without shared-bank tag scoping.
@@ -379,14 +423,21 @@ class EvalRunner:
                 if q.user_id:
                     queries_by_unit.setdefault(q.user_id, []).append(q)
 
-            # Group all docs by unit, keeping only units that have at least one query
-            docs_by_unit: dict[str, list] = {}
+            # Group all docs by unit, keeping only units that have at least one query.
+            docs_by_unit: dict[str, list[Document]] = {}
             for doc in documents:
                 uid = dataset.get_isolation_id(doc)
                 if uid is not None and uid in queries_by_unit:
                     docs_by_unit.setdefault(uid, []).append(doc)
+            batches_by_unit = {
+                uid: (_query_time_batches(docs, queries_by_unit[uid]) if dataset.query_timestamp_cutoff
+                      else [(docs, list(enumerate(queries_by_unit[uid])))])
+                for uid, docs in docs_by_unit.items()
+            }
             if self.on_documents is not None:
-                self.on_documents(doc for group in docs_by_unit.values() for doc in group)
+                self.on_documents(
+                    doc for batches in batches_by_unit.values() for docs, _ in batches for doc in docs
+                )
 
             # A unit is reusable only when every selected question has a saved result.
             prev_by_unit: dict[str, list[QueryResult]] = {}
@@ -408,7 +459,10 @@ class EvalRunner:
                 ingested_docs_count = previous.get("ingested_docs", 0)
             else:
                 pending_units = len(docs_by_unit) - len(prev_by_unit)
-                total_docs = sum(len(docs) for uid, docs in docs_by_unit.items() if uid not in prev_by_unit)
+                total_docs = sum(
+                    len(docs) for uid, batches in batches_by_unit.items()
+                    if uid not in prev_by_unit for docs, _ in batches
+                )
                 console.print(f"[dim]Ingesting {pending_units} units into {memory.name} ({getattr(memory, 'unit_concurrency', 1)} at a time)...[/dim]")
             report()
 
@@ -440,33 +494,35 @@ class EvalRunner:
                         results=done, ingestion_run_id=memory.ingestion_run_id,
                     ))
 
-                async def run_unit(unit_id, unit_docs):
-                    nonlocal ingestion_ms, ingestion_wall_ms, write_interval_start
-                    nonlocal ingested_docs_count, active_writes, active_evaluations
+                async def ingest_batch(documents, first):
+                    nonlocal ingestion_ms, ingestion_wall_ms, write_interval_start, ingested_docs_count, active_writes
+                    active_writes += 1
+                    report()
+                    t0 = time.perf_counter()
+                    if write_interval_start is None:
+                        write_interval_start = t0
+                    try:
+                        if dataset.query_timestamp_cutoff:
+                            await memory.async_ingest_increment(documents, first=first)
+                        else:
+                            await memory.async_ingest(documents)
+                    finally:
+                        ended = time.perf_counter()
+                        active_writes -= 1
+                        if not active_writes:
+                            ingestion_wall_ms += (ended - write_interval_start) * 1000
+                            write_interval_start = None
+                    ingestion_ms += (ended - t0) * 1000
+                    ingested_docs_count += len(documents)
+
+                async def run_unit(unit_id, batches):
+                    nonlocal active_evaluations
                     if unit_id in prev_by_unit:
                         progress.advance(task_id, len(prev_by_unit[unit_id]))
                         report(len(prev_by_unit[unit_id]))
                         return
                     async with unit_sem:
-                        if not skip_ingestion:
-                            active_writes += 1
-                            report()
-                            t0 = time.perf_counter()
-                            if write_interval_start is None:
-                                write_interval_start = t0
-                            try:
-                                await memory.async_ingest(unit_docs)
-                            finally:
-                                ended = time.perf_counter()
-                                active_writes -= 1
-                                if not active_writes:
-                                    ingestion_wall_ms += (ended - write_interval_start) * 1000
-                                    write_interval_start = None
-                            ingestion_ms += (ended - t0) * 1000
-                            ingested_docs_count += len(unit_docs)
-
-                        unit_queries = queries_by_unit.get(unit_id, [])
-                        unit_results = [None] * len(unit_queries)
+                        unit_results = [None] * len(queries_by_unit[unit_id])
 
                         async def bounded(i, q):
                             async with sem:
@@ -474,18 +530,23 @@ class EvalRunner:
                                 progress.advance(task_id)
                                 report(1)
 
-                        active_evaluations += 1
-                        report()
-                        try:
-                            await asyncio.gather(*[bounded(i, q) for i, q in enumerate(unit_queries)])
-                        finally:
-                            active_evaluations -= 1
+                        first = True
+                        for batch_docs, batch_queries in batches:
+                            if not skip_ingestion and (batch_docs or first):
+                                await ingest_batch(batch_docs, first)
+                                first = False
+                            active_evaluations += 1
+                            report()
+                            try:
+                                await asyncio.gather(*[bounded(i, q) for i, q in batch_queries])
+                            finally:
+                                active_evaluations -= 1
                         results_by_unit[unit_id] = unit_results
                         report()
-                    # Save incrementally after each unit to survive crashes
+                    # Save incrementally after each unit to survive crashes.
                     _save_partial()
 
-                await asyncio.gather(*[run_unit(uid, docs) for uid, docs in docs_by_unit.items()])
+                await asyncio.gather(*[run_unit(uid, batches) for uid, batches in batches_by_unit.items()])
                 # Same order as the units, whatever order they finished in.
                 return [r for uid in docs_by_unit for r in results_by_unit.get(uid, [])]
 

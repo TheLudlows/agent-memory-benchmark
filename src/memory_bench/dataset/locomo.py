@@ -4,8 +4,7 @@ LoComo dataset (https://github.com/snap-research/locomo).
 A long-term conversation memory benchmark with 10 multi-session conversations
 and open-ended QA pairs over personal conversation history.
 
-The official data is bundled. A checkout without the bundle can reuse a local
-cache or download the same upstream snapshot. LOCOMO_DATA_PATH overrides both.
+The original LoCoMo JSON is bundled. LOCOMO_DATA_PATH can override it.
 
 Structure
 ---------
@@ -24,27 +23,21 @@ Categories (query-level, by QA category int):
   2 → temporal     4 → open-domain    5 → adversarial
 """
 import json
-import lzma
-import os
 from datetime import datetime, timezone
 from pathlib import Path
-from shutil import copyfileobj
-from urllib.request import urlopen
 
 from rich.console import Console
 from rich.table import Table
 
-from ._cache import dataset_cache_dir, staging_file
+from ..data_files import data_path, read_json
+from ._cache import cached_or_download
 from .base import Dataset
 from ..models import Document, Query
 
-_BUNDLED_DATA_PATH = Path(__file__).resolve().parents[1] / "assets" / "locomo" / "locomo10.json.xz"
-_DATA_URL = (
-    "https://raw.githubusercontent.com/snap-research/locomo/"
-    "3eb6f2c585f5e1699204e3c3bdf7adc5c28cb376/data/locomo10.json"
-)
-
 SPLITS = ["locomo10"]
+_RAW_NAME = "locomo10.json"
+_RAW_URL = "https://raw.githubusercontent.com/snap-research/locomo/3eb6f2c585f5e1699204e3c3bdf7adc5c28cb376/data/" + _RAW_NAME
+_RAW_SHA256 = "79fa87e90f04081343b8c8debecb80a9a6842b76a7aa537dc9fdf651ea698ff4"
 
 _CATEGORY_NAMES = {
     1: "single-hop",
@@ -72,7 +65,7 @@ class LoComoDataset(Dataset):
     """
     LoComo benchmark — long-term multi-session conversation memory.
 
-    Set LOCOMO_DATA_PATH to override the bundled data with a local JSON file.
+    Set LOCOMO_DATA_PATH to point at a different local copy.
     """
 
     name = "locomo"
@@ -86,8 +79,9 @@ class LoComoDataset(Dataset):
     ]
 
     def __init__(self) -> None:
+        import os
         env = os.environ.get("LOCOMO_DATA_PATH")
-        self._local_path: Path | None = Path(env) if env else None
+        self._local_path: Path | None = Path(env).expanduser() if env else None
 
     # ------------------------------------------------------------------
     # Internal helpers
@@ -96,23 +90,13 @@ class LoComoDataset(Dataset):
     def _data_path(self) -> Path:
         if self._local_path:
             return self._local_path
-        if _BUNDLED_DATA_PATH.is_file():
-            return _BUNDLED_DATA_PATH
-
-        path = dataset_cache_dir("locomo") / "locomo10.json"
-        if not path.is_file():
-            with staging_file(path) as temporary:
-                with urlopen(_DATA_URL, timeout=90) as source, temporary.open("wb") as target:
-                    copyfileobj(source, target)
-                with temporary.open(encoding="utf-8") as data:
-                    json.load(data)
-        return path
+        bundle = data_path("offline", "locomo", "locomo10.json.xz")
+        if bundle.is_file():
+            return bundle
+        return cached_or_download("locomo", _RAW_NAME, _RAW_URL, _RAW_SHA256)
 
     def _load_raw(self) -> list[dict]:
-        path = self._data_path()
-        open_data = lzma.open if path.suffix == ".xz" else open
-        with open_data(path, "rt", encoding="utf-8") as f:
-            return json.load(f)
+        return read_json(self._data_path())
 
     @staticmethod
     def _session_keys(conv: dict) -> list[str]:

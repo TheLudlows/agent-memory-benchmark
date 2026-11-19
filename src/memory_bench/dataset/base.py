@@ -39,6 +39,8 @@ class Dataset(ABC):
     splits: list[str]
     task_type: Literal["open", "mcq", "coding", "retrieval"] = "open"
     isolation_unit: str | None = None
+    ingest_all_before_queries: bool = False  # Seed every unit before evaluating any query.
+    query_timestamp_cutoff: bool = False  # Only ingest documents visible at each query timestamp.
     links: list[dict] = []
     published: bool = False
     score_type: str = "accuracy"

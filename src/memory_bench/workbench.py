@@ -29,6 +29,7 @@ from .dataset.lifebench_v2 import SPLITS as LIFEBENCH_V2_SPLITS, TOTAL_QUERIES a
 from .dataset.locomo import SPLITS as LOCOMO_SPLITS
 from .dataset.longmemeval import SPLITS as LONGMEMEVAL_SPLITS
 from .dataset.precisionmembench import SPLITS as PRECISIONMEMBENCH_SPLITS, TOTAL_QUERIES as PRECISIONMEMBENCH_QUERIES
+from .json_files import write_json
 from .workbench_connections import BackendId, Connections, RunConnection
 from .workbench_models import ROLES, ModelInput, ModelProbeExit, ModelProbeInput, ModelSettings, Role
 
@@ -89,12 +90,6 @@ def _dataset_error(dataset: str, split: str) -> str | None:
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
-
-
-def write_json(path: Path, data: dict) -> None:
-    temporary = path.with_suffix(".tmp")
-    temporary.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
-    temporary.replace(path)
 
 
 def _read_json(path: Path) -> dict:
@@ -214,9 +209,9 @@ class RunManager:
             process = self.active[1]
             if process.poll() is not None:
                 raise HTTPException(409, "此评测已结束。")
-            self.cancelling = True
             path = self.root / run_id / "run.json"
             write_json(path, {**_read_json(path), "status": "cancelling"})
+            self.cancelling = True
             process.terminate()
 
     def stop(self) -> None:

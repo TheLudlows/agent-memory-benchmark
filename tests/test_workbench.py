@@ -14,6 +14,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from memory_bench.dataset.beam import BEAMDataset
+from memory_bench.json_files import write_json
 from memory_bench.judge import ScoringError
 from memory_bench.memory.base import MemoryProvider
 from memory_bench.memory.hindsight import HindsightHTTPMemoryProvider
@@ -203,6 +204,29 @@ def test_datasets_run_through_local_api_and_worker(monkeypatch, tmp_path, mock_s
         monkeypatch.delenv(name, raising=False)
     monkeypatch.setenv("PYTHONPATH", str(Path(__file__).resolve().parents[1] / "src"))
 
+    # The child must use UTF-8 even when the launcher supplies a Windows code page.
+    monkeypatch.setenv("PYTHONIOENCODING", "gbk")
+    # Reproduce a Windows reader holding the progress destination open during evaluation.
+    (tmp_path / "sitecustomize.py").write_text("""
+import json
+from pathlib import Path
+
+original = Path.replace
+
+def replace(self, target):
+    if target.name == "progress.json":
+        job = json.loads((target.parent / "run.json").read_text(encoding="utf-8"))
+        update = json.loads(self.read_text(encoding="utf-8"))
+        if job["selection"]["dataset"] == "locomo" and update["completed"] == 1 and update["stage"] != "finalizing":
+            error = PermissionError("simulated Windows progress lock")
+            error.winerror = 5
+            raise error
+    return original(self, target)
+
+Path.replace = replace
+""", encoding="utf-8")
+    monkeypatch.setenv("PYTHONPATH", os.pathsep.join((str(tmp_path), os.environ["PYTHONPATH"])))
+
     turn = {"role": "user", "content": "The location is Paris", "has_answer": True}
     fixtures = [
         ("locomo", "locomo10", "LOCOMO_DATA_PATH", {
@@ -272,6 +296,9 @@ def test_datasets_run_through_local_api_and_worker(monkeypatch, tmp_path, mock_s
             assert client.post("/api/runs", json=selection).status_code == 409
             detail_url, detail = await_result(client, response)
             assert detail["status"] == "completed", detail["log"]
+            assert "Saved →" in detail["log"]
+            if dataset == "locomo":
+                assert "simulated Windows progress lock" in detail["log"]
             document_count = 2 if dataset == "longmemeval" else 1
             assert detail["progress"] == {
                 "stage": "finalizing", "completed": question_count, "total": question_count,
@@ -1154,3 +1181,42 @@ def test_bm25_lifebench_batches_append_within_a_user_and_reset_for_the_next():
     asyncio.run(provider.async_ingest_increment([Document("other", "a different fact", user_id="bob")], first=True))
     results, _ = provider.retrieve("fact", user_id="bob")
     assert {doc.id for doc in results} == {"other"}
+
+
+def test_atomic_json_write_retries_transient_windows_errors(tmp_path, monkeypatch):
+    target = tmp_path / "progress.json"
+    target.write_text('{"completed": 2}', encoding="utf-8")
+    original = Path.replace
+    attempts = []
+
+    def replace(source, destination):
+        assert json.loads(destination.read_text(encoding="utf-8")) == {"completed": 2}
+        attempts.append(source)
+        assert json.loads(source.read_text(encoding="utf-8")) == {"completed": 3}
+        if len(attempts) < 3:
+            error = PermissionError("file in use")
+            error.winerror = 5 if len(attempts) == 1 else 32
+            raise error
+        return original(source, destination)
+
+    monkeypatch.setattr(Path, "replace", replace)
+    monkeypatch.setattr("memory_bench.json_files.sleep", lambda _: None)
+    write_json(target, {"completed": 3})
+    assert len(attempts) == 3
+    assert json.loads(target.read_text(encoding="utf-8")) == {"completed": 3}
+    assert list(tmp_path.iterdir()) == [target]
+
+
+def test_atomic_json_write_preserves_snapshot_on_permission_denial(tmp_path, monkeypatch):
+    target = tmp_path / "summary.json"
+    target.write_text('{"completed": 2}', encoding="utf-8")
+
+    def replace(source, destination):
+        raise PermissionError("permission denied")
+
+    monkeypatch.setattr(Path, "replace", replace)
+    monkeypatch.setattr("memory_bench.json_files.sleep", lambda _: pytest.fail("Unexpected retry"))
+    with pytest.raises(PermissionError, match="permission denied"):
+        write_json(target, {"completed": 3})
+    assert json.loads(target.read_text(encoding="utf-8")) == {"completed": 2}
+    assert list(tmp_path.iterdir()) == [target]

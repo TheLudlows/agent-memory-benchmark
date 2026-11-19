@@ -7,7 +7,6 @@ from collections.abc import Callable, Iterable
 from dataclasses import asdict, dataclass, fields
 from itertools import groupby
 from pathlib import Path
-from uuid import uuid4
 
 from .utils import count_tokens
 
@@ -21,6 +20,7 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(me
 logger = logging.getLogger(__name__)
 
 from .dataset.base import Dataset
+from .json_files import write_json
 from .judge import GeminiJudge, ScoringError
 from .llm.base import LLM
 from .memory.base import MemoryProvider, RetrievalError
@@ -693,10 +693,5 @@ class EvalRunner:
         ctx_tokens = [r["context_tokens"]   for r in results_dicts if r.get("context_tokens")   is not None]
         d["avg_retrieve_time_ms"] = round(sum(rec_times)  / len(rec_times),  1) if rec_times  else None
         d["avg_context_tokens"]   = round(sum(ctx_tokens) / len(ctx_tokens), 1) if ctx_tokens else None
-        temporary = path.with_suffix(f".{uuid4().hex}.tmp")
-        try:
-            temporary.write_text(json.dumps(d, indent=2))
-            temporary.replace(path)
-        finally:
-            temporary.unlink(missing_ok=True)
+        write_json(path, d, ensure_ascii=True, indent=2)
         console.print(f"\n[green]Saved → {path}[/green]")

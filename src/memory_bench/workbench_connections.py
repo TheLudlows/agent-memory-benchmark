@@ -4,12 +4,13 @@ import json
 import os
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from tempfile import NamedTemporaryFile
 from threading import Lock
 from typing import Literal
 from urllib.parse import urlsplit
 
 from pydantic import BaseModel, ConfigDict, Field, SecretStr
+
+from .json_files import write_json
 
 
 BackendId = Literal["contextbase", "mem0-cloud", "hindsight-http"]
@@ -115,17 +116,7 @@ def _environment_connection(backend: BackendId) -> Connection:
 
 def write_private_json(path: Path, data: dict) -> None:
     path.parent.mkdir(parents=True, mode=0o700, exist_ok=True)
-    temporary = None
-    try:
-        # NamedTemporaryFile creates owner-only files on POSIX. Rename preserves those permissions.
-        with NamedTemporaryFile(mode="w", encoding="utf-8", dir=path.parent,
-                                prefix=f".{path.stem}-", delete=False) as fh:
-            temporary = Path(fh.name)
-            json.dump(data, fh, ensure_ascii=False)
-        temporary.replace(path)
-    finally:
-        if temporary is not None:
-            temporary.unlink(missing_ok=True)
+    write_json(path, data)
 
 
 class Connections:

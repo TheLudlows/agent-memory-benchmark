@@ -22,7 +22,7 @@ docker compose run --rm --build amb
 docker compose run --rm --build amb run --dataset locomo --split locomo10 --memory hindsight-http --mode rag --query-limit 5 --name smoke
 ```
 
-只检查镜像和数据可运行 `docker compose run --rm --build amb dataset-stats --dataset locomo`，无需 Key。容器中的 `localhost` 指向容器自身。此镜像用于 HTTP 评测；ContextBase 的普通业务 Key 还需适配预建 Bank 的写入流程。
+只检查镜像和数据可运行 `docker compose run --rm --build amb dataset-stats --dataset locomo`，无需 Key。容器中的 `localhost` 指向容器自身。ContextBase 使用同一个镜像和预建的测试 Bank，见 [LoCoMo on ContextBase](#locomo-on-contextbase)。
 
 PR 的 GitHub Actions 构建成功后，也可下载 linux/amd64 镜像产物 `amb-locomo-linux-amd64`。解压下载的 ZIP，执行 `docker load -i amb-locomo-linux-amd64.tar.gz`，然后在仓库目录用 `docker compose run --rm amb` 启动。
 
@@ -94,6 +94,60 @@ uv run amb dataset-stats --dataset personamem
 # Browse results in the browser
 uv run amb view
 ```
+
+### LoCoMo on ContextBase
+
+Use a dedicated empty test Bank and a ContextBase business API key with read/write
+access to that Bank. Configure the following values in `.env` or your environment:
+
+```dotenv
+CONTEXTBASE_API_URL=https://contextbase.example.com
+CONTEXTBASE_API_TOKEN=<business-api-key>
+CONTEXTBASE_BANK_ID=<test-bank-id>
+GEMINI_API_KEY=<amb-model-key>
+OMB_ANSWER_LLM=gemini
+OMB_ANSWER_MODEL=gemini-2.5-flash-lite
+OMB_JUDGE_LLM=gemini
+OMB_JUDGE_MODEL=gemini-2.5-flash-lite
+AMB_RECALL_TYPES=world,experience
+```
+
+Run five questions from one conversation, with all of that conversation's sessions ingested:
+
+```bash
+uv run amb run --dataset locomo --split locomo10 --memory contextbase --mode rag \
+  --category conv-26 --query-limit 5 --name contextbase-locomo-smoke
+```
+
+The Docker equivalent writes results to `amb-results/` on the host:
+
+```bash
+docker compose run --rm --build amb run --dataset locomo --split locomo10 \
+  --memory contextbase --mode rag --category conv-26 --query-limit 5 \
+  --name contextbase-locomo-smoke
+```
+
+For a full run, omit `--category` and `--query-limit` and choose a new `--name`.
+For one physical Bank per conversation, set `CONTEXTBASE_BENCH_BANKS` to a JSON
+object mapping every selected conversation ID to a distinct pre-authorized Bank ID
+and leave `CONTEXTBASE_BANK_ID` unset. With one Bank, Recall uses strict tags for
+both the conversation and the run. Use separate empty Banks for cold-ingest or
+latency comparisons against `hindsight-http`, which uses one Bank per conversation.
+
+The adapter submits asynchronous Retain batches and waits for each operation before
+asking questions. `CONTEXTBASE_BENCH_RETAIN_TIMEOUT_S` defaults to 1800 seconds per
+ingest call. The adapter leaves test documents in their Banks for inspection. To
+reuse an ingested run, set `CONTEXTBASE_BENCH_RUN_ID` to the printed run ID or the
+result's `ingestion_run_id`. Pass `--skip-ingestion` with the same endpoint, Banks,
+dataset selection, run name, and output directory. AMB checks its completed ingest
+records in `_store` and verifies the documents still exist before scoring. Runs
+from before this check need one fresh ingest to create the records. Fresh runs
+get a new ingestion ID. Use empty Banks for a cold-ingest measurement.
+
+For a Hindsight comparison, keep the dataset, question IDs, answer and judge models,
+Recall token budgets, memory types, observation configuration, and concurrency the
+same on both sides. Set `LOCOMO_DATA_PATH` to a local copy of `locomo10.json` to pin
+the input file.
 
 ## Results
 

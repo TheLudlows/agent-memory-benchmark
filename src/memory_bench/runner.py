@@ -2,8 +2,9 @@ import asyncio
 import json
 import logging
 import time
-from dataclasses import asdict
+from dataclasses import asdict, fields
 from pathlib import Path
+from uuid import uuid4
 
 from .utils import count_tokens
 
@@ -72,6 +73,7 @@ class EvalRunner:
         description: str | None = None,
     ) -> EvalSummary:
         effective_name = run_name or memory.name
+        self._dataset_metrics = {}
         cat_label = f"  [bold]Category:[/bold] {category}" if category else ""
         name_label = f"  [bold]Run:[/bold] {effective_name}" if run_name else ""
         console.print(f"\n[bold]Dataset:[/bold] {dataset.name}  [bold]Split:[/bold] {split}{cat_label}  [bold]Memory:[/bold] {memory.name}{name_label}  [bold]Mode:[/bold] {mode.name}\n")
@@ -82,6 +84,19 @@ class EvalRunner:
 
         if oracle and not dataset.supports_oracle():
             raise ValueError(f"Dataset '{dataset.name}' does not support oracle mode (no gold_ids)")
+
+        use_cached_results = only_failed or skip_ingested or skip_retrieval or skip_answer
+        previous = self._load_previous(dataset.name, split, effective_name, mode.name) if skip_ingestion or use_cached_results else {}
+        if memory.ingestion_run_id and (use_cached_results or skip_ingestion):
+            same_ingest = (
+                previous.get("memory_provider") == memory.name
+                and previous.get("ingestion_run_id") == memory.ingestion_run_id
+            )
+            if use_cached_results and (not skip_ingestion or not same_ingest):
+                raise ValueError("To reuse ContextBase results, pass --skip-ingestion and the ingestion_run_id from those results.")
+            if not same_ingest:
+                previous = {}
+        previous_rows = {row["query_id"]: row for row in previous.get("results", [])}
 
         memory.initialize()
         store_dir = self.output_dir / dataset.name / effective_name / "_store" / split / (category or "all")
@@ -111,8 +126,7 @@ class EvalRunner:
             queries = [q for q in queries if q.id == query_id]
             console.print(f"  1 query loaded [dim](--query-id)[/dim]")
         elif only_failed:
-            prev = self._load_previous(dataset.name, split, effective_name, mode.name)
-            failed_ids = {r["query_id"] for r in prev.get("results", []) if not r.get("correct")}
+            failed_ids = {qid for qid, row in previous_rows.items() if not row.get("correct")}
             queries = [q for q in queries if q.id in failed_ids]
             console.print(f"  {len(queries)} failed queries loaded [dim](--only-failed)[/dim]")
         else:
@@ -155,14 +169,20 @@ class EvalRunner:
             console.print(f"[dim]Extraction labels: {', '.join(l['key'] for l in labels)}[/dim]")
 
         memory.prepare(store_dir, unit_ids=unit_ids, reset=not skip_ingestion)
+        if skip_ingestion and not (skip_retrieval or skip_answer):
+            requested_units = {q.user_id for q in queries}
+            memory.validate_ingestion([
+                doc for doc in documents if unit_ids is None or dataset.get_isolation_id(doc) in requested_units
+            ])
 
         stored_contexts: dict[str, str] = {}
         stored_answers: dict[str, str] = {}
         if skip_retrieval or skip_answer:
-            prev = self._load_previous(dataset.name, split, effective_name, mode.name)
-            stored_contexts = {r["query_id"]: r["context"] for r in prev.get("results", []) if r.get("context")}
+            if memory.ingestion_run_id and any(q.id not in previous_rows for q in queries):
+                raise ValueError("The ContextBase result file does not contain all selected questions.")
+            stored_contexts = {qid: row["context"] for qid, row in previous_rows.items() if row.get("context")}
             if skip_answer:
-                stored_answers = {r["query_id"]: r["answer"] for r in prev.get("results", []) if r.get("answer")}
+                stored_answers = {qid: row["answer"] for qid, row in previous_rows.items() if row.get("answer")}
                 console.print(f"[dim]Skipping retrieval+answer — re-judging {len(stored_answers)} cached answers.[/dim]\n")
             else:
                 console.print(f"[dim]Skipping retrieval — using {len(stored_contexts)} cached contexts.[/dim]\n")
@@ -306,43 +326,27 @@ class EvalRunner:
                 if uid is not None and uid in queries_by_unit:
                     docs_by_unit.setdefault(uid, []).append(doc)
 
-            # Determine which units are already done (have results in previous run)
-            already_done_units: set[str] = set()
+            # A unit is reusable only when every selected question has a saved result.
+            prev_by_unit: dict[str, list[QueryResult]] = {}
             if skip_ingested:
-                prev = self._load_previous(dataset.name, split, effective_name, mode.name)
-                for r in prev.get("results", []):
-                    uid = (r.get("meta", {}).get("sample_id")
-                           or r.get("meta", {}).get("user_id")
-                           or r.get("meta", {}).get("conversation_id")
-                           or r.get("query_id"))
-                    if uid:
-                        already_done_units.add(uid)
-                if already_done_units:
-                    console.print(f"[dim]Skipping {len(already_done_units)} already-ingested units: {', '.join(sorted(already_done_units))}[/dim]")
+                query_fields = {f.name for f in fields(QueryResult)}
+                for uid in docs_by_unit:
+                    unit_queries = queries_by_unit[uid]
+                    if all(q.id in previous_rows for q in unit_queries):
+                        prev_by_unit[uid] = [
+                            QueryResult(**{k: v for k, v in previous_rows[q.id].items() if k in query_fields})
+                            for q in unit_queries
+                        ]
+                if prev_by_unit:
+                    console.print(f"[dim]Skipping {len(prev_by_unit)} already-ingested units: {', '.join(sorted(prev_by_unit))}[/dim]")
 
             if skip_ingestion:
                 console.print(f"[dim]Skipping ingestion (--skip-ingestion).[/dim]\n")
-                ingestion_ms = self._load_previous_ingestion_ms(dataset.name, split, effective_name, mode.name)
-                ingested_docs_count = self._load_previous_ingested_docs(dataset.name, split, effective_name, mode.name)
+                ingestion_ms = previous.get("ingestion_time_ms", 0.0)
+                ingested_docs_count = previous.get("ingested_docs", 0)
             else:
-                pending_units = len(docs_by_unit) - len(already_done_units)
+                pending_units = len(docs_by_unit) - len(prev_by_unit)
                 console.print(f"[dim]Ingesting {pending_units} units into {memory.name} ({getattr(memory, 'unit_concurrency', 1)} at a time)...[/dim]")
-
-            # Pre-load previous results for skip-ingested fast-path
-            _prev_by_unit: dict[str, list[QueryResult]] = {}
-            if already_done_units:
-                prev_data = self._load_previous(dataset.name, split, effective_name, mode.name)
-                import dataclasses
-                _qr_fields = {f.name for f in dataclasses.fields(QueryResult)}
-                for r in prev_data.get("results", []):
-                    uid = (r.get("meta", {}).get("sample_id")
-                           or r.get("meta", {}).get("user_id")
-                           or r.get("meta", {}).get("conversation_id")
-                           or r.get("query_id"))
-                    if uid in already_done_units:
-                        _prev_by_unit.setdefault(uid, []).append(
-                            QueryResult(**{k: v for k, v in r.items() if k in _qr_fields})
-                        )
 
             async def _run_unit_sequential(progress, task_id):
                 nonlocal ingestion_ms, ingested_docs_count
@@ -352,10 +356,12 @@ class EvalRunner:
                 # ingest several at once says so with `unit_concurrency`. Within a unit the order
                 # stays ingest -> answer. Default 1: units run one after another, as before.
                 unit_sem = asyncio.Semaphore(max(1, int(getattr(memory, "unit_concurrency", 1))))
-                results_by_unit: dict[str, list] = {}
+                results_by_unit = dict(prev_by_unit)
 
                 def _save_partial() -> None:
                     done = [r for uid in docs_by_unit for r in results_by_unit.get(uid, []) if r]
+                    if only_failed:
+                        done = self._merge(done, previous_rows)
                     self._save(EvalSummary(
                         dataset=dataset.name, split=split, category=category,
                         memory_provider=memory.name, run_name=effective_name,
@@ -367,15 +373,13 @@ class EvalRunner:
                         score_type=dataset.score_type,
                         description=description, answer_llm=mode.llm_id,
                         judge_llm=(None if dataset.task_type in ("coding", "retrieval") else self._get_judge(dataset)._llm.model_id),
-                        results=done,
+                        results=done, ingestion_run_id=memory.ingestion_run_id,
                     ))
 
                 async def run_unit(unit_id, unit_docs):
                     nonlocal ingestion_ms, ingested_docs_count
-                    if unit_id in already_done_units:
-                        unit_prev = _prev_by_unit.get(unit_id, [])
-                        results_by_unit[unit_id] = unit_prev
-                        progress.advance(task_id, len(unit_prev))
+                    if unit_id in prev_by_unit:
+                        progress.advance(task_id, len(prev_by_unit[unit_id]))
                         return
                     async with unit_sem:
                         if not skip_ingestion:
@@ -410,8 +414,8 @@ class EvalRunner:
             # Batch mode: ingest all documents upfront, then answer all queries.
             if skip_ingestion:
                 console.print(f"[dim]Skipping ingestion (--skip-ingestion).[/dim]\n")
-                ingestion_ms = self._load_previous_ingestion_ms(dataset.name, split, effective_name, mode.name)
-                ingested_docs_count = self._load_previous_ingested_docs(dataset.name, split, effective_name, mode.name)
+                ingestion_ms = previous.get("ingestion_time_ms", 0.0)
+                ingested_docs_count = previous.get("ingested_docs", 0)
             else:
                 console.print(f"[dim]Ingesting into {memory.name}...[/dim]")
                 t0 = time.perf_counter()
@@ -446,7 +450,7 @@ class EvalRunner:
                     console.print_json(json.dumps(r.raw_response))
 
         if only_failed:
-            results = self._merge(results, dataset.name, split, effective_name, mode.name)
+            results = self._merge(results, previous_rows)
 
         correct_count = sum(1 for r in results if r.correct)
         has_scores = any(r.score is not None for r in results)
@@ -473,26 +477,20 @@ class EvalRunner:
             answer_llm=mode.llm_id,
             judge_llm=(None if dataset.task_type in ("coding", "retrieval") else self._get_judge(dataset)._llm.model_id),
             results=results,
+            ingestion_run_id=memory.ingestion_run_id,
         )
-        # Final save truncates to THIS run's query set: without it, a later smaller run (e.g. -q 6)
-        # keeps stale rows from an earlier larger run under the same run name, and the output file
-        # silently reads as a bigger run than actually happened. Partial saves (mid-run, above)
-        # deliberately do NOT truncate — they accumulate units as they complete. --only-failed reruns a
-        # subset INTO the earlier run, so it keeps every row (truncating dropped all the passed ones).
         self._dataset_metrics = dataset.summary_metrics(results) or {}
-        self._save(summary, query_ids=None if only_failed else {q.id for q in queries})
+        self._save(summary)
         memory.cleanup()
         return summary
 
-    def _merge(self, new_results: list[QueryResult], dataset: str, split: str, memory: str, mode: str) -> list[QueryResult]:
-        """Merge new results into existing ones — new entries win by query_id."""
-        prev = self._load_previous(dataset, split, memory, mode)
-        old_by_id = {r["query_id"]: r for r in prev.get("results", [])}
+    def _merge(self, new_results: list[QueryResult], previous_rows: dict[str, dict]) -> list[QueryResult]:
+        """Update the previous result set when explicitly rerunning failed questions."""
         new_by_id = {r.query_id: r for r in new_results}
-        old_by_id.update(new_by_id)  # new results win
+        ids = dict.fromkeys([*previous_rows, *new_by_id])
         return [
-            new_by_id.get(qid) or QueryResult(**r)
-            for qid, r in old_by_id.items()
+            new_by_id[qid] if qid in new_by_id else QueryResult(**previous_rows[qid])
+            for qid in ids
         ]
 
     def _output_path(self, dataset: str, split: str, run_name: str, mode: str) -> Path:
@@ -507,21 +505,12 @@ class EvalRunner:
                 pass
         return {}
 
-    def _load_previous_ingestion_ms(self, dataset: str, split: str, memory: str, mode: str) -> float:
-        return self._load_previous(dataset, split, memory, mode).get("ingestion_time_ms", 0.0)
-
-    def _load_previous_ingested_docs(self, dataset: str, split: str, memory: str, mode: str) -> int:
-        return self._load_previous(dataset, split, memory, mode).get("ingested_docs", 0)
-
-    def _save(self, summary: EvalSummary, query_ids: set | None = None) -> None:
+    def _save(self, summary: EvalSummary) -> None:
         path = self._output_path(summary.dataset, summary.split, summary.run_name, summary.mode)
         path.parent.mkdir(parents=True, exist_ok=True)
-        # Always merge: new results overwrite existing ones by query_id, old ones are kept —
-        # except that a final save (query_ids given) drops rows outside this run's query set.
-        merged = self._merge(summary.results, summary.dataset, summary.split, summary.run_name, summary.mode)
-        if query_ids is not None:
-            merged = [r for r in merged if r.query_id in query_ids]
         d = asdict(summary)
+        if summary.ingestion_run_id is None:
+            del d["ingestion_run_id"]
         # Dataset-specific headline metrics, inserted next to accuracy: the manifest reader
         # regexes only the first 512 bytes of the file, so they have to land early.
         extra = self._dataset_metrics or {}
@@ -534,19 +523,23 @@ class EvalRunner:
             d = reordered
         if summary.mode == "coding":
             d["view"] = "agent"   # the UI's multi-turn agent renderer
-        results_dicts      = [asdict(r) for r in merged]
-        d["total_queries"] = len(merged)
-        d["correct"]       = sum(1 for r in merged if r.correct)
-        has_scores = any(r.score is not None for r in merged)
+        results_dicts = d["results"]
+        d["total_queries"] = len(summary.results)
+        d["correct"] = sum(1 for r in summary.results if r.correct)
+        has_scores = any(r.score is not None for r in summary.results)
         if has_scores:
-            scored = [r.score for r in merged if r.score is not None]
+            scored = [r.score for r in summary.results if r.score is not None]
             d["accuracy"] = sum(scored) / len(scored) if scored else 0.0
         else:
-            d["accuracy"] = d["correct"] / d["total_queries"] if merged else 0.0
+            d["accuracy"] = d["correct"] / d["total_queries"] if summary.results else 0.0
         rec_times  = [r["retrieve_time_ms"] for r in results_dicts if r.get("retrieve_time_ms") is not None]
         ctx_tokens = [r["context_tokens"]   for r in results_dicts if r.get("context_tokens")   is not None]
         d["avg_retrieve_time_ms"] = round(sum(rec_times)  / len(rec_times),  1) if rec_times  else None
         d["avg_context_tokens"]   = round(sum(ctx_tokens) / len(ctx_tokens), 1) if ctx_tokens else None
-        d["results"]       = results_dicts
-        path.write_text(json.dumps(d, indent=2))
+        temporary = path.with_suffix(f".{uuid4().hex}.tmp")
+        try:
+            temporary.write_text(json.dumps(d, indent=2))
+            temporary.replace(path)
+        finally:
+            temporary.unlink(missing_ok=True)
         console.print(f"\n[green]Saved → {path}[/green]")

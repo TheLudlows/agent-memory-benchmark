@@ -54,6 +54,8 @@ def run(
     description: str = typer.Option(None, "--description", "-d", help="Optional description for this run (stored in the result JSON)"),
 ) -> None:
     """Run an evaluation on a single split (optionally filtered to a category)."""
+    if memory == "contextbase" and (dataset not in {"locomo", "locomo-fixed"} or mode != "rag"):
+        raise typer.BadParameter("ContextBase supports locomo and locomo-fixed in rag mode.", param_hint="--memory")
     no_llm = mode == "retrieval"  # search only: no answer model, no judge, no LLM key needed
     if not no_llm:
         _resolve_gemini_key()

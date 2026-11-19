@@ -80,3 +80,4 @@ class EvalSummary:
     answer_llm: str | None = None     # e.g. "gemini:gemini-2.5-flash-lite"
     judge_llm: str | None = None      # e.g. "gemini:gemini-2.5-flash-lite"
     results: list[QueryResult] = field(default_factory=list)
+    ingestion_run_id: str | None = None

@@ -13,6 +13,7 @@ class MemoryProvider(ABC):
     variant: str | None = None    # variant label (e.g. "local", "cloud", "http"); None = no variants
     link: str | None = None       # URL to provider website / docs
     logo: str | None = None       # URL to provider logo image
+    ingestion_run_id: str | None = None
     concurrency: int = 4  # max parallel queries; override to 1 for non-thread-safe providers
     supports_filters: bool = False
     """Whether retrieve() accepts a `filters` argument (a provider-neutral tag filter,
@@ -33,6 +34,9 @@ class MemoryProvider(ABC):
         unique user_id values that will be seen during ingest/retrieve. Providers that want
         per-unit storage (e.g. one bank per episode) can create all units upfront here instead
         of relying on shared-bank tag scoping."""
+
+    def validate_ingestion(self, documents: list[Document]) -> None:
+        """Check that the selected documents can be reused when skipping ingestion."""
 
     @abstractmethod
     def ingest(self, documents: list[Document]) -> None:

@@ -321,6 +321,12 @@ Path.replace = replace
             result = client.get(detail_url + "/result")
             assert "attachment" in result.headers["Content-Disposition"]
             rows = result.json()["results"]
+            assert metrics["summary"]["avg_context_tokens"] == result.json()["avg_context_tokens"]
+            token_rows = client.get(detail_url + "/context-tokens").json()
+            assert token_rows["total"] == question_count
+            assert token_rows["rows"] == [
+                {field: row[field] for field in ("query_id", "query", "context_tokens")} for row in rows
+            ]
             if dataset == "beam":
                 assert result.json()["accuracy"] == 0.5
                 assert [row["score"] for row in rows] == [1.0, 0.0, 1.0, 0.0]
@@ -446,6 +452,34 @@ def test_beam_rejects_an_invalid_judge_score(payload):
 
     with pytest.raises(ScoringError):
         BEAMDataset._rubric_item_score("Question", "Answer", "Criterion", Judge())
+
+
+def test_context_token_metrics_are_available_for_legacy_results(tmp_path):
+    run_id = "0" * 32
+    results = tmp_path / "runs"
+    directory = results / run_id
+    path = directory / "results/locomo" / f"web-{run_id}" / "rag/locomo10.json"
+    path.parent.mkdir(parents=True)
+    write_json(directory / "run.json", {
+        "id": run_id, "status": "completed",
+        "selection": {"dataset": "locomo", "split": "locomo10", "backend": "contextbase"},
+    })
+    write_json(directory / "summary.json", {"total_queries": 2})
+    write_json(path, {"avg_context_tokens": 7.5, "results": [
+        {"query_id": "q0", "query": "Empty recall", "context_tokens": 0},
+        {"query_id": "q1", "query": "Question", "context_tokens": 15, "context": "Unneeded payload"},
+    ]})
+
+    url = f"/api/runs/{run_id}"
+    with TestClient(create_app(results), base_url="http://localhost") as client:
+        for suffix in ("", "/metrics"):
+            assert client.get(url + suffix).json()["summary"]["avg_context_tokens"] == 7.5
+        for offset, count in enumerate((0, 15)):
+            body = client.get(url + f"/context-tokens?offset={offset}&limit=1").json()
+            assert body["total"] == 2
+            assert body["rows"] == [{
+                "query_id": f"q{offset}", "query": ("Empty recall", "Question")[offset], "context_tokens": count,
+            }]
 
 
 @pytest.mark.parametrize("replace_on", ["http.response.start", "http.response.body"])

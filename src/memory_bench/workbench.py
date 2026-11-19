@@ -7,8 +7,10 @@ import subprocess
 import sys
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
+from functools import lru_cache
 from hashlib import sha256
 from pathlib import Path
+from statistics import mean
 from threading import Lock, Thread
 from time import monotonic
 from typing import Annotated, Literal
@@ -240,6 +242,29 @@ def _result_path(directory: Path, job: dict) -> Path:
     return directory / "results" / selection.dataset / f"web-{job['id']}" / selection.mode / f"{selection.split}.json"
 
 
+@lru_cache(maxsize=16)
+def _context_token_report(path: Path) -> tuple[float | None, list[dict]]:
+    # Completed run files are immutable. Cache only the fields used in the table.
+    result = _read_json(path)
+    rows = [
+        {"query_id": row["query_id"], "query": row.get("query", ""), "context_tokens": row.get("context_tokens")}
+        for row in result.get("results", [])
+    ]
+    average = result.get("avg_context_tokens")
+    if average is None:
+        counts = [row["context_tokens"] for row in rows if row["context_tokens"] is not None]
+        average = round(mean(counts), 1) if counts else None
+    return average, rows
+
+
+def _run_summary(directory: Path, job: dict) -> dict:
+    summary = _read_json(directory / "summary.json")
+    if summary and "avg_context_tokens" not in summary and job["status"] in {"completed", "scoring_incomplete"}:
+        average, _ = _context_token_report(_result_path(directory, job))
+        summary["avg_context_tokens"] = average
+    return summary
+
+
 async def _stream_result(path: Path):
     # Keep one file open for the whole download, even if the runner replaces the
     # checkpoint. The response does not advertise a size from a separate stat.
@@ -386,14 +411,25 @@ def create_app(output_dir: Path) -> FastAPI:
             **job,
             "result_available": _result_path(directory, job).is_file(),
             "progress": _read_json(directory / "progress.json"),
-            "summary": _read_json(directory / "summary.json"),
+            "summary": _run_summary(directory, job),
             "log": _log_tail(directory / "run.log"),
         }
 
     @app.get("/api/runs/{run_id}/metrics")
     def metrics(run_id: str):
         directory = manager.directory(run_id)
-        return {**_read_json(directory / "run.json"), "summary": _read_json(directory / "summary.json")}
+        job = _read_json(directory / "run.json")
+        return {**job, "summary": _run_summary(directory, job)}
+
+    @app.get("/api/runs/{run_id}/context-tokens")
+    def context_tokens(run_id: str, offset: Annotated[int, Query(ge=0)] = 0,
+                       limit: Annotated[int, Query(ge=1, le=100)] = 20):
+        directory = manager.directory(run_id)
+        job = _read_json(directory / "run.json")
+        if job["status"] not in {"completed", "scoring_incomplete"}:
+            raise HTTPException(404, "当前还没有完整的逐题上下文指标。")
+        average, rows = _context_token_report(_result_path(directory, job))
+        return {"average": average, "total": len(rows), "rows": rows[offset:offset + limit]}
 
     @app.post("/api/runs/{run_id}/cancel", status_code=202)
     def cancel(run_id: str):

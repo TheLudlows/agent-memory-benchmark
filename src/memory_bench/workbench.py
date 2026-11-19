@@ -27,7 +27,7 @@ from .dataset.beam import BEAMDataset, DEFAULT_JUDGE_MODEL, SPLITS as BEAM_SPLIT
 from .dataset.locomo import SPLITS as LOCOMO_SPLITS
 from .dataset.longmemeval import SPLITS as LONGMEMEVAL_SPLITS
 from .workbench_connections import BackendId, Connections, ConnectionUpdate, RunConnection
-from .workbench_models import ModelInput, ModelSettings, Role, RunModels
+from .workbench_models import ModelInput, ModelSettings, Role
 
 DATASETS = {
     "locomo": LOCOMO_SPLITS,
@@ -63,7 +63,6 @@ class RunSelection(BaseModel):
 class RunRequest(RunSelection):
     name: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=80)]
     connection: RunConnection
-    models: RunModels = Field(default_factory=RunModels)
 
 
 def _dataset_error(dataset: str, split: str) -> str | None:
@@ -123,7 +122,7 @@ class RunManager:
             raise HTTPException(422, error)
         try:
             connection = self.connections.for_run(selection.backend, selection.connection)
-            models, model_env = self.models.for_run(selection.dataset, selection.models)
+            models, model_env = self.models.for_run(selection.dataset)
         except ValueError as exc:
             raise HTTPException(422, str(exc)) from exc
         with self.lock:
@@ -135,7 +134,7 @@ class RunManager:
             job = {
                 "id": run_id,
                 "name": selection.name,
-                "selection": selection.model_dump(exclude={"name", "connection", "models"}),
+                "selection": selection.model_dump(exclude={"name", "connection"}),
                 "target": {"api_url": connection.api_url, "bank_id": connection.bank_id},
                 "models": models,
                 "status": "running",
@@ -267,7 +266,7 @@ def create_app(output_dir: Path) -> FastAPI:
     @app.exception_handler(RequestValidationError)
     async def validation_error(request: Request, exc: RequestValidationError):
         if request.method == "POST" and request.url.path == "/api/runs":
-            return JSONResponse({"detail": "评测配置无效，请检查名称、类型、本轮连接和模型。"}, status_code=422)
+            return JSONResponse({"detail": "评测配置无效，请检查名称、类型和本轮连接。"}, status_code=422)
         if request.url.path.startswith("/api/connections/"):
             # FastAPI normally returns the invalid input, which may contain a key.
             return JSONResponse({"detail": "后端配置格式无效，请检查输入。"}, status_code=422)

@@ -639,7 +639,7 @@ def test_workbench_refuses_config_directory_inside_results(monkeypatch, tmp_path
         create_app(results)
 
 
-def test_workbench_runs_use_independent_model_overrides(monkeypatch, tmp_path, mock_services, private_workbench_config):
+def test_workbench_runs_use_saved_global_models(monkeypatch, tmp_path, mock_services, private_workbench_config):
     endpoint, calls = mock_services
     for name in ("OPENAI_API_KEY", "GEMINI_API_KEY", "GOOGLE_API_KEY", "GROQ_API_KEY"):
         monkeypatch.delenv(name, raising=False)
@@ -672,16 +672,16 @@ def test_workbench_runs_use_independent_model_overrides(monkeypatch, tmp_path, m
     def assert_run_models(client, response, answer, judge):
         url, detail = await_result(client, response)
         assert detail["status"] == "completed", detail["log"]
-        for role, (name, source, service, key) in {"answer": answer, "judge": judge}.items():
+        for role, (name, service, key) in {"answer": answer, "judge": judge}.items():
             assert detail["summary"][f"{role}_llm"] == f"openai:{name}"
             assert detail["models"][role] == {
-                "provider": "openai", "model": name, "source": source, "api_url": f"{endpoint}/{service}/v1",
+                "provider": "openai", "model": name, "api_url": f"{endpoint}/{service}/v1",
             }
             assert any(path == f"/{service}/v1/chat/completions" and
                        call["model"] == name and call["authorization"] == f"Bearer {key}" for path, call in calls)
         for path in (url, url + "/result", "/api/config", "/api/runs"):
             text = client.get(path).text
-            for key in [answer[3], judge[3]]:
+            for key in (answer[2], judge[2]):
                 assert key not in text
         return url
 
@@ -695,39 +695,39 @@ def test_workbench_runs_use_independent_model_overrides(monkeypatch, tmp_path, m
         assert "saved-judge-key" not in saved.text
         assert client.post("/api/runs", json=selection).status_code == 422
 
-        override = config("answer-round", "answer-round", "override-answer-key")
-        invalid = client.post("/api/runs", json={**selection, "models": {"answer": {**override, "model": ""}}})
-        assert invalid.status_code == 422 and "override-answer-key" not in invalid.text
-        run = client.post("/api/runs", json={**selection, "models": {"answer": override}})
-        assert run.status_code == 201, run.text
-        assert client.post("/api/models/judge", json=config("judge-updated", "judge")).status_code == 200
-        first_url = assert_run_models(client, run, ("answer-round", "override", "answer-round", "override-answer-key"),
-                                      ("judge-default", "global", "judge", "saved-judge-key"))
         answer = client.post("/api/models/answer", json=config("answer-default", "environment"))
         assert answer.status_code == 200 and answer.json()["has_key"]
+
+        override = config("answer-round", "answer-round", "override-answer-key")
+        invalid = client.post("/api/runs", json={**selection, "models": {"answer": override}})
+        assert invalid.status_code == 422 and "override-answer-key" not in invalid.text
+        assert client.get("/api/runs").json() == []
+
+        run = client.post("/api/runs", json=selection)
+        assert run.status_code == 201, run.text
+        assert client.post("/api/models/judge", json=config("judge-updated", "judge")).status_code == 200
+        first_url = assert_run_models(client, run, ("answer-default", "environment", "environment-model-key"),
+                                      ("judge-default", "judge", "saved-judge-key"))
 
     with TestClient(create_app(directory), base_url="http://127.0.0.1") as client:
         models = client.get("/api/config").json()["models"]
         assert models["answer"]["model"] == "answer-default"
         assert models["judge"]["model"] == "judge-updated"
         assert client.get(first_url).json()["models"]["judge"]["model"] == "judge-default"
-        response = client.post("/api/runs", json={
-            **selection, "models": {"judge": config("judge-round", "judge-round", "override-judge-key")},
-        })
-        assert_run_models(client, response, ("answer-default", "global", "environment", "environment-model-key"),
-                          ("judge-round", "override", "judge-round", "override-judge-key"))
-        assert client.get("/api/config").json()["models"]["judge"]["model"] == "judge-updated"
+        response = client.post("/api/runs", json=selection)
+        assert_run_models(client, response, ("answer-default", "environment", "environment-model-key"),
+                          ("judge-updated", "judge", "saved-judge-key"))
         assert client.post("/api/models/judge/reset").json()["provider"] == "gemini"
         storage, = private_workbench_config.glob("*/models.json")
         assert storage.stat().st_mode & 0o077 == 0
-        assert "override-" not in storage.read_text(encoding="utf-8")
+        assert "override-answer-key" not in storage.read_text(encoding="utf-8")
         assert "saved-judge-key" not in storage.read_text(encoding="utf-8")
         assert "environment-model-key" not in storage.read_text(encoding="utf-8")
         assert not list(directory.rglob("models.json"))
 
 
 def test_workbench_keeps_beam_judge_default(monkeypatch, tmp_path):
-    from memory_bench.workbench_models import ModelSettings, RunModels
+    from memory_bench.workbench_models import ModelSettings
 
     monkeypatch.setenv("GEMINI_API_KEY", "test-gemini-key")
     monkeypatch.setenv("OMB_ANSWER_LLM", "gemini")
@@ -735,7 +735,7 @@ def test_workbench_keeps_beam_judge_default(monkeypatch, tmp_path):
     monkeypatch.delenv("OMB_ANSWER_MODEL", raising=False)
     monkeypatch.delenv("OMB_JUDGE_MODEL", raising=False)
     settings = ModelSettings(tmp_path / "models.json")
-    beam, _ = settings.for_run("beam", RunModels())
-    locomo, _ = settings.for_run("locomo", RunModels())
+    beam, _ = settings.for_run("beam")
+    locomo, _ = settings.for_run("locomo")
     assert beam["judge"]["model"] == "gemini-3.5-flash"
     assert beam["answer"]["model"] == locomo["judge"]["model"] == "gemini-2.5-flash-lite"

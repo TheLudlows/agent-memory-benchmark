@@ -57,8 +57,15 @@ def mock_services():
                 if body["model"].endswith("-probe-auth"):
                     self.send_json({"error": {"message": self.headers.get("Authorization")}}, status=401)
                     return
-                schema = body["response_format"]["json_schema"]["schema"]["properties"]
+                response_format = body.get("response_format")
                 prompt = body["messages"][0]["content"]
+                if body["model"] == "gateway-ignores-schema" and response_format:
+                    self.send_json({"choices": [{"message": {"content": "Lina visited Paris."}}]})
+                    return
+                if body["model"] == "gateway-rejects-schema" and response_format:
+                    self.send_json({"error": {"message": "response_format json_schema not supported"}}, status=400)
+                    return
+                schema = response_format["json_schema"]["schema"] if response_format else json.loads(prompt.splitlines()[-1])
                 values = {"answer": "Paris", "reasoning": "From memory", "score": 1.0, "correct": True, "reason": "Match"}
                 if body["model"] == "judge-probe-invalid":
                     values["correct"] = "true"
@@ -70,7 +77,10 @@ def mock_services():
                 elif "What is their salary?" in prompt:
                     values["answer"] = "$120,000"
                     values["score"] = 0.0
-                self.send_json({"choices": [{"message": {"content": json.dumps({key: values[key] for key in schema})}}]})
+                content = json.dumps({key: values[key] for key in schema["properties"]})
+                if body["model"] == "gateway-rejects-schema":
+                    content = f"```json\n{content}\n```"
+                self.send_json({"choices": [{"message": {"content": content}}]})
                 return
             calls.append((self.path, body))
             if self.path.endswith("/memories"):
@@ -844,3 +854,49 @@ def test_workbench_model_probe_can_bypass_environment_proxy(monkeypatch, tmp_pat
         assert client.post(path, json=config).status_code == 200
         assert calls.pop()[0] == f"{endpoint}/v1/chat/completions"
         assert client.post("/api/models/answer", json={**config, "bypass_proxy": True}).status_code == 422
+
+
+@pytest.mark.parametrize("model", ["gateway-ignores-schema", "gateway-rejects-schema", "native-schema"])
+def test_openai_json_response_compatibility(monkeypatch, mock_services, model):
+    from memory_bench.llm.base import Schema
+    from memory_bench.llm.openai import OpenAILLM
+
+    endpoint, calls = mock_services
+    for name in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy"):
+        monkeypatch.delenv(name, raising=False)
+    client = OpenAILLM(model, api_key="stub-model-key", base_url=endpoint + "/v1")
+    answer = Schema(properties={"answer": {"type": "string"}}, required=["answer"])
+    judge = Schema(properties={"correct": {"type": "boolean"}}, required=["correct"])
+
+    assert client.generate("Where?", answer) == {"answer": "Paris"}
+    assert client.generate("Is it correct?", judge) == {"correct": True}
+    requests = [call for _, call in calls]
+    assert requests[0]["response_format"]["json_schema"]["strict"] is True
+    if model == "native-schema":
+        assert len(requests) == 2
+        assert requests[1]["response_format"]["json_schema"]["schema"]["required"] == ["correct"]
+    else:
+        assert len(requests) == 3
+        assert all("response_format" not in request for request in requests[1:])
+        for request, prompt, field in zip(requests[1:], ("Where?", "Is it correct?"), ("answer", "correct")):
+            content = request["messages"][0]["content"]
+            assert content.startswith(prompt)
+            assert "return only one valid JSON object" in content
+            assert json.loads(content.splitlines()[-1])["required"] == [field]
+
+
+def test_workbench_answer_probe_handles_plain_text_from_openai_gateway(monkeypatch, tmp_path, mock_services):
+    endpoint, calls = mock_services
+    monkeypatch.setenv("PYTHONPATH", str(Path(__file__).resolve().parents[1] / "src"))
+    config = {
+        "provider": "openai", "model": "gateway-ignores-schema",
+        "api_url": f"{endpoint}/v1", "api_key": "probe-key", "bypass_proxy": True,
+    }
+    with TestClient(create_app(tmp_path / "runs"), base_url="http://127.0.0.1") as client:
+        response = client.post("/api/models/answer/test", json=config)
+        assert response.status_code == 200, response.text
+        assert response.json()["model"] == "openai:gateway-ignores-schema"
+    initial, fallback = [call for _, call in calls]
+    assert "response_format" in initial
+    assert "response_format" not in fallback
+    assert json.loads(fallback["messages"][0]["content"].splitlines()[-1])["required"] == ["reasoning", "answer"]

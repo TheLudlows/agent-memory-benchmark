@@ -98,9 +98,10 @@ uv run amb view
 ### AMB Workbench · 浏览器评测
 
 评测台可搭配 LoCoMo、BEAM 或 LongMemEval 和 ContextBase、Mem0 Cloud 或 Hindsight HTTP。
-在页面选择数据集、split 和后端，默认跑 5 题，也可跑全量。题数上限只限制问答，
+每轮填写评测名称，选择数据集、split 和后端，默认跑 5 题，也可跑全量。题数上限只限制问答，
 选中题目对应的会话历史仍会写入。运行时可看进度和日志，结束后可查看得分、写入耗时、平均检索延迟，
-或下载 AMB 逐题结果 JSON。
+或下载 AMB 逐题结果 JSON。完成的评测会保存得分、题数、写入耗时、文档数、平均检索延迟和检索 P95。
+在「运行历史」勾选 2 至 4 轮，即可用图表对比得分与耗时。页面会提示题目或回答、评分模型不一致的情况。
 
 1. 复制 `.env.example` 为 `.env`，填写回答和评分模型所用的 API Key。默认两者使用 Gemini。
 2. 启动评测台并打开 http://127.0.0.1:8090：
@@ -109,7 +110,8 @@ uv run amb view
    docker compose up --build amb-web
    ```
 
-3. 在页面选择记忆后端，展开「连接配置」，填好后点击「保存连接」。
+3. 在「本轮连接」填写 API 地址和 Key。若要复用同一地址已有的 Key，显式勾选「使用该地址已保存的 Key」。
+   每轮的历史记录包含名称、数据集、后端和实际使用的地址。单次输入的 Key 不写入历史或结果。
 
    | 后端 | 页面配置 |
    |---|---|
@@ -117,10 +119,10 @@ uv run amb view
    | Mem0 Cloud | API 地址（默认 `https://api.mem0.ai`）和 API Key，替换地址时需兼容 Mem0 Cloud API |
    | Hindsight HTTP | API 地址，开启鉴权时填写 API Key |
 
-评测台优先使用网页保存的后端设置。也可以通过 `.env` 提供默认值：ContextBase 使用
+点击「保存为默认连接」可为后续评测预填地址。也可以通过 `.env` 提供默认值：ContextBase 使用
 `CONTEXTBASE_API_URL`、`CONTEXTBASE_API_TOKEN`、`CONTEXTBASE_BANK_ID`；Mem0 使用 `MEM0_CLOUD_URL`、
 `MEM0_CLOUD_KEY`（或 `MEM0_API_KEY`）；Hindsight 使用 `HINDSIGHT_HTTP_URL`、`HINDSIGHT_HTTP_KEY`。
-页面的「恢复默认配置」会删除该后端保存的连接，再读取这些默认值。网页设置保存在评测台运行目录的
+页面的「恢复初始配置」会删除该后端保存的连接，再读取这些默认值。网页设置保存在评测台运行目录的
 `.connections.json`，重启后仍可使用。页面只显示 Key 是否已配置，改地址时需要重新填写 Key。
 
 也可以在仓库根目录直接运行 `uv run amb workbench`。本地直跑时，同机 Hindsight 的地址通常是

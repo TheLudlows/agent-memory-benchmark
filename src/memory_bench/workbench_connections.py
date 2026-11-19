@@ -32,12 +32,25 @@ BACKENDS: dict[BackendId, Backend] = {
 }
 
 
-class ConnectionUpdate(BaseModel):
+class ConnectionInput(BaseModel):
     model_config = ConfigDict(extra="forbid")
     api_url: str = Field(max_length=2048)
     api_key: SecretStr | None = Field(default=None, max_length=4096)
     bank_id: str = Field(default="", max_length=256)
+
+    def supplied_key(self) -> str:
+        key = self.api_key.get_secret_value().strip() if self.api_key else ""
+        if any(ord(char) < 32 or ord(char) == 127 for char in key):
+            raise ValueError("API Key 不能包含换行或控制字符。")
+        return key
+
+
+class ConnectionUpdate(ConnectionInput):
     clear_key: bool = False
+
+
+class RunConnection(ConnectionInput):
+    use_saved_key: bool = False
 
 
 def _api_url(value: str) -> str:
@@ -73,6 +86,13 @@ class Connection:
         if backend == "contextbase" and not (self.bank_id or self.bank_mapping):
             missing.append("Bank ID")
         return missing
+
+    def worker_env(self, backend: BackendId) -> dict[str, str]:
+        spec = BACKENDS[backend]
+        env = {spec.url_env: self.api_url, spec.key_env: self.api_key}
+        if backend == "contextbase":
+            env.update(CONTEXTBASE_BANK_ID=self.bank_id, CONTEXTBASE_BENCH_BANKS=self.bank_mapping)
+        return env
 
 
 def _environment_connection(backend: BackendId) -> Connection:
@@ -134,9 +154,7 @@ class Connections:
 
     def save(self, backend: BackendId, update: ConnectionUpdate) -> dict:
         api_url = _api_url(update.api_url)
-        supplied_key = update.api_key.get_secret_value().strip() if update.api_key else ""
-        if any(ord(char) < 32 or ord(char) == 127 for char in supplied_key):
-            raise ValueError("API Key 不能包含换行或控制字符。")
+        supplied_key = update.supplied_key()
         if update.clear_key and (not BACKENDS[backend].key_optional or supplied_key):
             raise ValueError("只有 Hindsight 可以清除 Key，清除时请留空 Key 输入框。")
 
@@ -162,13 +180,23 @@ class Connections:
                 self._write({name: value for name, value in self.saved.items() if name != backend})
             return self._public(backend)
 
-    def worker_env(self, backend: BackendId) -> dict[str, str]:
+    def for_run(self, backend: BackendId, request: RunConnection) -> Connection:
+        api_url = _api_url(request.api_url)
+        key = request.supplied_key()
         with self.lock:
-            connection = self._get(backend)
+            current = self._get(backend)
+        same_url = api_url == current.api_url
+        if request.use_saved_key:
+            if key:
+                raise ValueError("请输入本轮 Key 或选择使用已保存的 Key。")
+            if not same_url or not current.api_key:
+                raise ValueError("已保存的 Key 仅可用于对应的 API 地址。请填写本轮 Key。")
+            key = current.api_key
+        if backend != "contextbase" and request.bank_id:
+            raise ValueError("只有 ContextBase 需要 Bank ID。")
+        bank_id = request.bank_id.strip()
+        mapping = current.bank_mapping if not bank_id and same_url else ""
+        connection = Connection(api_url, key, bank_id, mapping)
         if missing := connection.missing(backend):
-            raise ValueError(f"请先在评测台中配置 {BACKENDS[backend].label} 的 " + "、".join(missing))
-        spec = BACKENDS[backend]
-        env = {spec.url_env: connection.api_url, spec.key_env: connection.api_key}
-        if backend == "contextbase":
-            env.update(CONTEXTBASE_BANK_ID=connection.bank_id, CONTEXTBASE_BENCH_BANKS=connection.bank_mapping)
-        return env
+            raise ValueError("请填写本轮评测的 " + "、".join(missing))
+        return connection

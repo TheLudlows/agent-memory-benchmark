@@ -1,0 +1,44 @@
+name: AMB ECS system disk
+
+on:
+  push:
+    branches: [build/amb-ecs-image]
+    paths:
+      - .github/workflows/ecs-system-image.yml
+      - deploy/build-ecs-system-image.sh
+  workflow_dispatch:
+    inputs:
+      workbench_revision:
+        description: Main commit SHA with a published Workbench image
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  packages: read
+
+jobs:
+  image:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 50
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Install QEMU and cloud-init seed tooling
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends qemu-system-x86 qemu-utils cloud-image-utils
+      - name: Build and boot-test the AMB system disk
+        env:
+          WORKBENCH_REVISION: ${{ inputs.workbench_revision || '0fac2daf21b0fc26558e8f5f25991b26b2503a40' }}
+        run: bash deploy/build-ecs-system-image.sh "$WORKBENCH_REVISION" "$RUNNER_TEMP/amb-ecs"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: amb-ecs-ubuntu-24.04-amd64-qcow2
+          path: |
+            ${{ runner.temp }}/amb-ecs/*.qcow2
+            ${{ runner.temp }}/amb-ecs/SHA256SUMS
+          compression-level: 0
+          if-no-files-found: error
+          retention-days: 30

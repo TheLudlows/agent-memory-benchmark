@@ -70,6 +70,7 @@ def test_installed_cli_can_load_data_from_the_repository_directory(offline, monk
 
 def test_missing_bundle_uses_cache_then_downloads_once(monkeypatch, tmp_path):
     monkeypatch.delenv("LOCOMO_DATA_PATH", raising=False)
+    monkeypatch.setenv("AMB_ALLOW_DATASET_DOWNLOADS", "1")
     monkeypatch.setattr(locomo, "data_path", lambda *parts: tmp_path.joinpath(*parts))
     monkeypatch.setattr(_cache, "dataset_cache_dir", lambda _: tmp_path)
     raw = b"[]"
@@ -94,10 +95,21 @@ def test_missing_bundle_uses_cache_then_downloads_once(monkeypatch, tmp_path):
 
 
 def test_failed_checksum_does_not_publish_the_dataset(monkeypatch, tmp_path):
+    monkeypatch.setenv("AMB_ALLOW_DATASET_DOWNLOADS", "1")
     monkeypatch.setattr(_cache, "dataset_cache_dir", lambda _: tmp_path)
     monkeypatch.setattr(_cache, "urlopen", lambda *_, **__: io.BytesIO(b"bad payload"))
     with pytest.raises(ValueError, match="checksum"):
         _cache.cached_or_download("locomo", "locomo10.json", locomo._RAW_URL, locomo._RAW_SHA256)
+    assert not list(tmp_path.iterdir())
+
+
+def test_missing_bundle_reports_the_missing_file_without_network(offline, monkeypatch, tmp_path):
+    monkeypatch.delenv("AMB_ALLOW_DATASET_DOWNLOADS", raising=False)
+    monkeypatch.setattr(locomo, "data_path", lambda *parts: tmp_path.joinpath(*parts))
+    monkeypatch.setattr(_cache, "dataset_cache_dir", lambda _: tmp_path)
+    with pytest.raises(FileNotFoundError) as exc:
+        get_dataset("locomo").load_queries("locomo10")
+    assert str(exc.value.filename) == str(tmp_path / "locomo10.json")
     assert not list(tmp_path.iterdir())
 
 
@@ -113,6 +125,7 @@ def test_local_query_bundle_is_enough_to_load_queries(module, name, split, offli
 def test_beam_downloads_only_the_missing_raw_shard(monkeypatch, tmp_path):
     arrow = pytest.importorskip("pyarrow")
     parquet = pytest.importorskip("pyarrow.parquet")
+    monkeypatch.setenv("AMB_ALLOW_DATASET_DOWNLOADS", "1")
     monkeypatch.delenv("BEAM_10M_DATA_PATH", raising=False)
     monkeypatch.setattr(beam, "data_path", lambda *parts: tmp_path.joinpath(*parts))
     monkeypatch.setattr(beam, "dataset_cache_dir", lambda _: tmp_path)

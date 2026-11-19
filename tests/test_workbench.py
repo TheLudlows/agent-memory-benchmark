@@ -1,6 +1,7 @@
 import asyncio
 import io
 import json
+import os
 import threading
 import time
 from dataclasses import asdict
@@ -585,10 +586,12 @@ def test_mem0_client_uses_configured_host(monkeypatch):
 
     monkeypatch.setenv("MEM0_CLOUD_URL", "https://example.test/mem0")
     monkeypatch.setenv("MEM0_CLOUD_KEY", "test-api-key")
+    monkeypatch.delenv("MEM0_TELEMETRY", raising=False)
     calls = []
     monkeypatch.setattr(mem0, "MemoryClient", lambda **kwargs: calls.append(kwargs))
     Mem0CloudMemoryProvider()._ensure_client()
     assert calls == [{"api_key": "test-api-key", "host": "https://example.test/mem0"}]
+    assert os.environ["MEM0_TELEMETRY"] == "false"
 
 
 def test_workbench_requires_per_run_details_and_never_echoes_key(monkeypatch, tmp_path):

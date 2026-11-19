@@ -145,8 +145,8 @@ Docker Compose 使用独立的 `amb-workbench-config` 卷。升级后，旧的 `
 
 可选 split 为 LoCoMo `locomo10`、BEAM `100k / 500k / 1m / 10m`、LongMemEval `s`、
 LifeBench 2.0 `zh`（3,380 题）、PrecisionMemBench `single-turn`（77 个用例）。以上数据和分词表都随仓库及
-镜像提供。使用完整仓库并提前安装依赖，或提前导入构建好的镜像，运行时会优先读取随附文件。
-只有缺少随附文件且 `.datasets/` 中也没有对应缓存时，才会下载固定的上游版本并缓存。
+镜像提供。使用完整仓库并提前安装依赖，或提前导入构建好的镜像，运行时从本地读取数据和词表，只需能访问配置的记忆后端和模型端点。
+本地文件缺失时，默认直接报告缺失项。在可联网的环境中准备缓存时，可以设置 `AMB_ALLOW_DATASET_DOWNLOADS=1`，让 AMB 下载缺失的上游文件。
 仍可通过 `LOCOMO_DATA_PATH`、
 `LONGMEMEVAL_DATA_PATH` 指定本地数据。BEAM 按 split 使用 `BEAM_100K_DATA_PATH`、
 `BEAM_500K_DATA_PATH`、`BEAM_1M_DATA_PATH` 或 `BEAM_10M_DATA_PATH`。如果评测台继续使用

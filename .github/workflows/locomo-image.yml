@@ -68,28 +68,3 @@ jobs:
           docker tag amb-locomo:local "$image:latest"
           docker push "$image:sha-$GITHUB_SHA"
           docker push "$image:latest"
-
-  workbench:
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-    steps:
-      - uses: actions/checkout@v4
-      - name: Build and start Workbench
-        run: docker compose up --build --detach amb-web
-      - name: Verify Workbench HTTP and static UI
-        run: |
-          curl --fail --silent --show-error --connect-timeout 2 --max-time 5 \
-            --retry 15 --retry-all-errors --retry-delay 2 --retry-max-time 40 \
-            http://127.0.0.1:8090/api/config -o "$RUNNER_TEMP/workbench-config.json"
-          python -c "import json, sys; assert 'contextbase' in json.load(open(sys.argv[1]))['backends']" \
-            "$RUNNER_TEMP/workbench-config.json"
-          curl --fail --silent --show-error http://127.0.0.1:8090/ -o "$RUNNER_TEMP/workbench.html"
-          grep -q 'evaluation-name' "$RUNNER_TEMP/workbench.html"
-          curl --fail --silent --show-error http://127.0.0.1:8090/assets/workbench.js -o /dev/null
-      - name: Show Workbench logs
-        if: failure()
-        run: docker compose logs amb-web
-      - name: Stop Workbench
-        if: always()
-        run: docker compose --profile web down --volumes

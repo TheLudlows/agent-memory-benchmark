@@ -171,6 +171,31 @@ ContextBase 使用预授权的测试 Bank，并以运行和题目所属的隔离
 评测进程，之前已提交给后端的写入可能仍在处理。历史、日志和结果均保存在
 `amb-results/workbench/`（Compose）或 `outputs/workbench/`（直接运行）。
 
+#### 在华为云 ECS 上启动 Workbench
+
+[AMB Workbench image](https://github.com/TheLudlows/agent-memory-benchmark/actions/workflows/workbench-image.yml)
+在通过断网测试后，将 Linux x86_64 服务镜像发布到
+`ghcr.io/theludlows/agent-memory-benchmark:workbench`。
+需要固定版本时，将标签换成 `workbench-sha-<完整提交 SHA>`。
+
+1. 创建能访问 GHCR 的 x86_64 ECS，选择带 Cloud-init 的 Ubuntu 镜像。在「实例自定义数据」中粘贴
+   [启动脚本](deploy/ecs-user-data.sh)。首次启动时，脚本安装 Docker（如需要）、启动 Workbench，并持久化评测结果和配置。
+2. 从本地建立 SSH 隧道，然后打开 [Workbench](http://127.0.0.1:8090)。请按所选系统镜像替换登录用户名。
+
+   ```sh
+   ssh -N -L 8090:127.0.0.1:8090 ubuntu@ECS_IP
+   ```
+
+已安装 Docker 的断网主机，可以从上述工作流下载 `amb-workbench-linux-amd64`，将解压后的文件复制到主机，再执行以下命令。
+
+```sh
+sha256sum -c amb-workbench-linux-amd64.tar.gz.sha256
+sudo docker load -i amb-workbench-linux-amd64.tar.gz
+sudo AMB_IMAGE=amb-workbench:local AMB_PULL=never bash ecs-user-data.sh
+```
+
+启动后，在页面填写容器可访问的记忆服务地址，并按评测需要配置回答和评分模型。无公网时，可以使用同机或内网的 API。
+
 ### LoCoMo on ContextBase
 
 Use a dedicated empty test Bank and a ContextBase business API key with read/write

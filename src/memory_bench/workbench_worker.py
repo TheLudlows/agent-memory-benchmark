@@ -3,6 +3,7 @@
 import json
 import logging
 import sys
+import traceback
 from collections.abc import Iterable
 from dataclasses import asdict
 from hashlib import sha256
@@ -21,6 +22,7 @@ from .memory.mem0_cloud import Mem0CloudMemoryProvider
 from .models import Document
 from .modes import get_mode
 from .modes.rag import RAGMode
+from .run_diagnostics import error_location, error_reason, evaluation_step
 from .runner import EvaluationProgress, EvalRunner
 from .workbench import SCORING_INCOMPLETE_EXIT_CODE, RunSelection, _read_json
 from .workbench_models import ModelProbeExit, Role, worker_model
@@ -69,8 +71,10 @@ def run(directory: Path) -> int:
             document_digest.update((item + "\n").encode("utf-8"))
 
     models = job["models"]
-    answer_llm = worker_model("answer", models["answer"]) if spec.mode == "rag" else None
-    judge_llm = worker_model("judge", models["judge"]) if spec.mode == "rag" else None
+    with evaluation_step("初始化回答模型"):
+        answer_llm = worker_model("answer", models["answer"]) if spec.mode == "rag" else None
+    with evaluation_step("初始化评分模型"):
+        judge_llm = worker_model("judge", models["judge"]) if spec.mode == "rag" else None
     runner = EvalRunner(
         output_dir=directory / "results", on_progress=progress, on_documents=record_documents,
         judge_llm=judge_llm,
@@ -142,7 +146,29 @@ def probe_model(role: Role) -> int:
         return ModelProbeExit.REQUEST_FAILED
 
 
+def run_with_diagnostics(directory: Path) -> int:
+    logging.getLogger("httpx").setLevel(logging.WARNING)
+    try:
+        return run(directory)
+    except Exception as exc:
+        try:
+            stage = _read_json(directory / "progress.json").get("stage")
+        except (OSError, ValueError):
+            stage = None
+        default = {
+            "loading": "加载评测数据",
+            "ingesting": "写入记忆",
+            "evaluating": "检索、回答或评分",
+            "ingesting_and_evaluating": "写入或答题",
+            "finalizing": "保存评测结果",
+        }.get(stage, "启动评测")
+        print("调用位置：", file=sys.stderr)
+        traceback.print_tb(exc.__traceback__)
+        print(f"[评测失败] {error_location(exc, default)}：{error_reason(exc)}", file=sys.stderr, flush=True)
+        return 1
+
+
 if __name__ == "__main__":
     if sys.argv[1] == "--probe-model":
         raise SystemExit(probe_model(sys.argv[2]))
-    raise SystemExit(run(Path(sys.argv[1])))
+    raise SystemExit(run_with_diagnostics(Path(sys.argv[1])))

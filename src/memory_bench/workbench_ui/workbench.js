@@ -559,14 +559,18 @@ async function loadDetail(id) {
   $("download").hidden = !job.result_available;
   $("download").href = `/api/runs/${id}/result`;
   $("download").textContent = job.status === "completed" ? "下载结果 JSON" : "下载已保存的部分结果";
-  if (job.status === "failed" && $("log").textContent !== job.log) $("logs").open = true;
-  if ($("log").textContent !== job.log) $("log").textContent = job.log;
   const failedScoring = job.status === "scoring_incomplete";
+  const failed = job.status === "failed";
+  if ((failed || failedScoring) && $("log").textContent !== job.log) $("logs").open = true;
+  if ($("log").textContent !== job.log) $("log").textContent = job.log;
+  const failurePrefix = "[评测失败] ";
+  const failure = failed ? job.log.split("\n").findLast((line) => line.startsWith(failurePrefix)) : null;
+  const exitCode = job.exit_code == null ? "" : `（退出码 ${job.exit_code}）`;
   setError("run-error", failedScoring
     ? (retrieval
       ? `${s.scoring_failed_queries} 个用例因检索或来源错误无法评分。可下载逐题结果查看原因。`
       : `${s.scoring_failed_queries} 道题评分失败，未生成总分。可下载已保存的逐题结果。`)
-    : job.status === "failed" ? "评测进程退出，请查看日志。" : "");
+    : failed ? (failure?.slice(failurePrefix.length, failurePrefix.length + 300) || `评测进程退出${exitCode}，请查看日志。`) : "");
 }
 
 async function refresh() {

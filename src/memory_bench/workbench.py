@@ -178,12 +178,16 @@ class RunManager:
 
     def _monitor(self, job: dict, process: subprocess.Popen, secrets: list[str]) -> None:
         directory = self.root / job["id"]
+        # Short credentials must match a whole value, or a key such as "1"
+        # would also mask digits inside IP addresses, timestamps and query IDs.
+        redactor = re.compile("|".join(
+            re.escape(secret) if len(secret) >= 8 else rf"(?<![\w.-]){re.escape(secret)}(?![\w.-])"
+            for secret in secrets
+        )) if secrets else None
         try:
             with process.stdout as output, (directory / "run.log").open("w", encoding="utf-8", buffering=1) as log:
                 for line in output:
-                    for secret in secrets:
-                        line = line.replace(secret, "[redacted]")
-                    log.write(line)
+                    log.write(redactor.sub("[redacted]", line) if redactor else line)
         except OSError:
             process.kill()
         finally:

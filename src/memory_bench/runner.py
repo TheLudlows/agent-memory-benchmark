@@ -26,6 +26,7 @@ from .llm.base import LLM
 from .memory.base import MemoryProvider, RetrievalError
 from .modes.base import ResponseMode
 from .models import AnswerResult, Document, EvalSummary, Query, QueryResult
+from .run_diagnostics import error_location, error_reason, evaluation_step
 
 console = Console()
 
@@ -151,7 +152,8 @@ class EvalRunner:
                 row.update(correct=False, score=None, scoring_failed=True,
                            judge_reason="Legacy result with an unjudged abstention answer")
 
-        memory.initialize()
+        with evaluation_step("初始化记忆后端"):
+            memory.initialize()
         store_dir = self.output_dir / dataset.name / effective_name / "_store" / split / (category or "all")
 
         # Parse comma-separated categories; load query_limit queries per category
@@ -222,7 +224,8 @@ class EvalRunner:
             memory.set_extraction_labels(labels)
             console.print(f"[dim]Extraction labels: {', '.join(l['key'] for l in labels)}[/dim]")
 
-        memory.prepare(store_dir, unit_ids=unit_ids, reset=not skip_ingestion)
+        with evaluation_step("准备记忆后端"):
+            memory.prepare(store_dir, unit_ids=unit_ids, reset=not skip_ingestion)
         if skip_ingestion and not (skip_retrieval or skip_answer):
             requested_units = {q.user_id for q in queries}
             memory.validate_ingestion([
@@ -247,12 +250,14 @@ class EvalRunner:
         async def _process_one(q) -> QueryResult:
             for _attempt in range(4):
                 try:
-                    return await _process_one_attempt(q)
+                    with evaluation_step("问答评测", f"题目 {q.id}"):
+                        return await _process_one_attempt(q)
                 except Exception as exc:
                     msg = str(exc)
                     if _attempt < 3 and any(code in msg for code in ("502", "503", "529", "429", "overloaded", "quota")):
                         wait = 15 * (2 ** _attempt)
-                        logger.warning("[query:%s] transient error (attempt %d/4), retrying in %ds: %s", q.id, _attempt + 1, wait, msg[:120])
+                        logger.warning("[%s] 第 %d/4 次尝试失败，%d 秒后重试：%s",
+                                       error_location(exc, "问答评测"), _attempt + 1, wait, error_reason(exc))
                         await asyncio.sleep(wait)
                     else:
                         raise
@@ -260,7 +265,7 @@ class EvalRunner:
 
         async def _process_one_attempt(q) -> QueryResult:
             t_start = time.perf_counter()
-            logger.info("[query:%s] start — %s", q.id, q.query[:80])
+            logger.debug("[query:%s] start", q.id)
             meta = {**q.meta, "_prompt_fn": _prompt_fn}
             rf = dataset.retrieval_filter(q)
             if rf is not None:
@@ -272,17 +277,18 @@ class EvalRunner:
                 answer_result = AnswerResult(answer=ans, reasoning="", context=ctx, retrieve_time_ms=0.0)
             elif skip_retrieval:
                 ctx = stored_contexts.get(q.id, "")
-                answer_result = await asyncio.to_thread(mode.answer_from_context, q.query, ctx, task_type, meta)
+                with evaluation_step("生成回答"):
+                    answer_result = await asyncio.to_thread(mode.answer_from_context, q.query, ctx, task_type, meta)
             else:
                 try:
                     answer_result = await mode.async_answer(q.query, memory, task_type=task_type, user_id=q.user_id, meta=meta)
                 except RetrievalError as exc:
                     retrieval_error = str(exc)
+                    logger.warning("[检索记忆 · 题目 %s] %s", q.id, error_reason(exc))
                     q.meta["scoring_error_stage"] = "retrieval"
                     answer_result = AnswerResult(
                         answer="", reasoning="", context="", retrieve_time_ms=(time.perf_counter() - t_start) * 1000,
                     )
-            logger.info("[query:%s] answer done in %.1fs (retrieve=%.0fms)", q.id, time.perf_counter() - t_start, answer_result.retrieve_time_ms)
             # raw_response is not stored; a provider that measures the answer (cost, tokens) hands
             # those numbers over under "meta", and they land in the row's meta.
             q.meta.update((answer_result.raw_response or {}).get("meta") or {})
@@ -323,6 +329,7 @@ class EvalRunner:
                 except ScoringError as exc:
                     correct, judge_reason, scoring_failed = False, str(exc), True
                     q.meta["scoring_error_stage"] = "attribution"
+                    logger.warning("[校验召回来源 · 题目 %s] %s", q.id, error_reason(exc))
                 else:
                     score = float(ranked_score[0]) if ranked_score else None
             elif not answer_result.context and not dataset.should_judge_empty_context(q.meta):
@@ -343,11 +350,12 @@ class EvalRunner:
                 )
                 judge_llm = self._get_judge(dataset)._llm
                 try:
-                    score = float(await asyncio.to_thread(dataset.score_result, tmp_result, judge_llm))
+                    with evaluation_step("评分"):
+                        score = float(await asyncio.to_thread(dataset.score_result, tmp_result, judge_llm))
                 except ScoringError as exc:
                     scoring_failed = True
                     correct, judge_reason = False, str(exc)
-                    logger.warning("[query:%s] %s: %s", q.id, exc, exc.__cause__ or exc)
+                    logger.warning("[评分 · 题目 %s] %s", q.id, error_reason(exc))
                 else:
                     correct = score >= 0.5
                     judge_reason = f"score={score:.3f}"
@@ -360,9 +368,18 @@ class EvalRunner:
                     )
                 else:
                     judge_prompt_fn = dataset.build_judge_prompt
-                judge = await asyncio.to_thread(self._get_judge(dataset).score, q.query, answer_result.answer, q.gold_answers, judge_prompt_fn)
+                with evaluation_step("评分"):
+                    judge = await asyncio.to_thread(self._get_judge(dataset).score, q.query, answer_result.answer, q.gold_answers, judge_prompt_fn)
                 correct, judge_reason = judge.correct, judge.reason
-            logger.info("[query:%s] done in %.1fs — correct=%s score=%s", q.id, time.perf_counter() - t_start, correct, score)
+            if not scoring_failed:
+                outcome = "通过" if correct else "未通过"
+                if judge_reason == _EMPTY_CONTEXT_REASON:
+                    outcome = "召回为空，按规则未通过"
+                if score is not None:
+                    outcome += f"，得分 {score:.3f}"
+                retrieve_ms = answer_result.retrieve_time_ms
+                retrieval_time = "" if retrieve_ms is None else f"，检索 {retrieve_ms:.0f} ms"
+                logger.info("[题目 %s] %s，耗时 %.1f s%s", q.id, outcome, time.perf_counter() - t_start, retrieval_time)
 
             return QueryResult(
                 query_id=q.id,
@@ -533,7 +550,8 @@ class EvalRunner:
                         first = True
                         for batch_docs, batch_queries in batches:
                             if not skip_ingestion and (batch_docs or first):
-                                await ingest_batch(batch_docs, first)
+                                with evaluation_step("写入记忆", f"隔离单元 {unit_id}"):
+                                    await ingest_batch(batch_docs, first)
                                 first = False
                             active_evaluations += 1
                             report()
@@ -568,7 +586,8 @@ class EvalRunner:
             else:
                 console.print(f"[dim]Ingesting into {memory.name}...[/dim]")
                 t0 = time.perf_counter()
-                memory.ingest(documents)
+                with evaluation_step("写入记忆"):
+                    memory.ingest(documents)
                 ingestion_ms = (time.perf_counter() - t0) * 1000
                 ingestion_wall_ms = ingestion_ms
                 ingested_docs_count = len(documents)

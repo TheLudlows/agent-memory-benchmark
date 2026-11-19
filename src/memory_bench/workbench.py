@@ -9,22 +9,22 @@ from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from threading import Lock, Thread
-from typing import Literal
+from typing import Annotated, Literal
 from uuid import uuid4
 
 from anyio import open_file
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.exception_handlers import request_validation_exception_handler
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, StringConstraints, model_validator
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from .dataset.beam import SPLITS as BEAM_SPLITS, local_data_path as beam_local_data_path
 from .dataset.locomo import SPLITS as LOCOMO_SPLITS
 from .dataset.longmemeval import SPLITS as LONGMEMEVAL_SPLITS
-from .workbench_connections import BackendId, Connections, ConnectionUpdate
+from .workbench_connections import BackendId, Connections, ConnectionUpdate, RunConnection
 
 DATASETS = {
     "locomo": LOCOMO_SPLITS,
@@ -53,6 +53,11 @@ class RunSelection(BaseModel):
         if self.split not in DATASETS[self.dataset]:
             raise ValueError(f"Split {self.split!r} is unavailable for {self.dataset}.")
         return self
+
+
+class RunRequest(RunSelection):
+    name: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=80)]
+    connection: RunConnection
 
 
 def _dataset_error(dataset: str, split: str) -> str | None:
@@ -116,11 +121,11 @@ class RunManager:
             if job.get("status") in {"running", "cancelling"}:
                 write_json(path, {**job, "status": "interrupted", "ended_at": _now()})
 
-    def start(self, selection: RunSelection) -> dict:
+    def start(self, selection: RunRequest) -> dict:
         if error := _dataset_error(selection.dataset, selection.split):
             raise HTTPException(422, error)
         try:
-            backend_env = self.connections.worker_env(selection.backend)
+            connection = self.connections.for_run(selection.backend, selection.connection)
         except ValueError as exc:
             raise HTTPException(422, str(exc)) from exc
         if missing := _missing_models():
@@ -133,13 +138,15 @@ class RunManager:
             directory.mkdir(mode=0o700)
             job = {
                 "id": run_id,
-                "selection": selection.model_dump(),
+                "name": selection.name,
+                "selection": selection.model_dump(exclude={"name", "connection"}),
+                "target": {"api_url": connection.api_url, "bank_id": connection.bank_id},
                 "models": _models(),
                 "status": "running",
                 "started_at": _now(),
             }
             write_json(directory / "run.json", job)
-            env = {**os.environ, **backend_env, "NO_COLOR": "1", "PYTHONUNBUFFERED": "1"}
+            env = {**os.environ, **connection.worker_env(selection.backend), "NO_COLOR": "1", "PYTHONUNBUFFERED": "1"}
             env.setdefault("OMB_ANSWER_LLM", "gemini")
             env.setdefault("OMB_JUDGE_LLM", "gemini")
             if env.get("GEMINI_API_KEY"):
@@ -264,6 +271,8 @@ def create_app(output_dir: Path) -> FastAPI:
 
     @app.exception_handler(RequestValidationError)
     async def validation_error(request: Request, exc: RequestValidationError):
+        if request.method == "POST" and request.url.path == "/api/runs":
+            return JSONResponse({"detail": "评测配置无效，请检查名称、类型和本轮连接。"}, status_code=422)
         if request.url.path.startswith("/api/connections/"):
             # FastAPI normally returns the invalid input, which may contain a key.
             return JSONResponse({"detail": "后端配置格式无效，请检查输入。"}, status_code=422)
@@ -297,12 +306,13 @@ def create_app(output_dir: Path) -> FastAPI:
         return manager.connections.reset(backend)
 
     @app.get("/api/runs")
-    def runs():
+    def runs(limit: Annotated[int, Query(ge=1, le=100)] = 30, offset: Annotated[int, Query(ge=0)] = 0):
         jobs = [_read_json(path) for path in manager.root.glob("*/run.json")]
-        return sorted(jobs, key=lambda job: job["started_at"], reverse=True)[:30]
+        ordered = sorted(jobs, key=lambda job: (job["started_at"], job["id"]), reverse=True)
+        return ordered[offset:offset + limit]
 
     @app.post("/api/runs", status_code=201)
-    def start(selection: RunSelection):
+    def start(selection: RunRequest):
         return manager.start(selection)
 
     @app.get("/api/runs/{run_id}")
@@ -316,6 +326,11 @@ def create_app(output_dir: Path) -> FastAPI:
             "summary": _read_json(directory / "summary.json"),
             "log": _log_tail(directory / "run.log"),
         }
+
+    @app.get("/api/runs/{run_id}/metrics")
+    def metrics(run_id: str):
+        directory = manager.directory(run_id)
+        return {**_read_json(directory / "run.json"), "summary": _read_json(directory / "summary.json")}
 
     @app.post("/api/runs/{run_id}/cancel", status_code=202)
     def cancel(run_id: str):

@@ -86,6 +86,7 @@ def run(directory: Path) -> int:
             f"Evaluated {summary.total_queries} of {expected_queries} selected questions. Check the dataset and local data file."
         )
     times = sorted(result.retrieve_time_ms for result in summary.results if result.retrieve_time_ms is not None)
+    context_tokens = [row.context_tokens for row in summary.results if row.context_tokens is not None]
     question_digest = sha256()
     for row in sorted(summary.results, key=lambda row: row.query_id):
         question = [
@@ -108,6 +109,7 @@ def run(directory: Path) -> int:
         "ingestion_wall_time_ms": summary.ingestion_wall_time_ms,
         "avg_retrieve_time_ms": mean(times) if times else None,
         "p95_retrieve_time_ms": times[ceil(0.95 * len(times)) - 1] if times else None,
+        "avg_context_tokens": round(mean(context_tokens), 1) if context_tokens else None,
         "question_fingerprint": question_digest.hexdigest(),
         "document_fingerprint": document_digest.hexdigest(),
         "answer_llm": summary.answer_llm,

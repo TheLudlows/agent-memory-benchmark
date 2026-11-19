@@ -16,6 +16,7 @@ const isActive = (job) => job && ["running", "cancelling"].includes(job.status);
 const formatDate = (value) => new Date(value).toLocaleString("zh-CN", { hour12: false });
 
 const pageSize = 12;
+const contextTokenPageSize = 20;
 const compareLimit = 4;
 const compareIds = new Set();
 let comparisonVersion = 0;
@@ -27,6 +28,9 @@ let hasNextPage = false;
 let activeJob = false;
 let submitting = false;
 let questionCountVersion = 0;
+let contextTokenRunId;
+let contextTokenOffset = 0;
+let contextTokenRequest = 0;
 
 const modelRoles = { answer: "回答模型", judge: "评分模型" };
 const providerLabels = { gemini: "Gemini", openai: "OpenAI 兼容", groq: "Groq" };
@@ -303,6 +307,8 @@ function title(job) {
 const number = (value, unit = "") => value == null ? "—" : `${value.toFixed(1)}${unit}`;
 const scoreText = (score) => score == null ? "—" : number(score * 100, "%");
 const seconds = (ms) => ms == null ? "—" : number(ms / 1000, " s");
+const tokenFormat = new Intl.NumberFormat("zh-CN", { maximumFractionDigits: 1 });
+const tokensText = (value) => value == null ? "—" : tokenFormat.format(value);
 
 function bars(container, rows, maximum, format) {
   container.replaceChildren(...rows.map(([label, value]) => {
@@ -396,6 +402,9 @@ async function drawComparison() {
       ["平均检索延迟", (s) => s.avg_retrieve_time_ms, (value) => number(value, " ms")],
       ["检索 P95", (s) => s.p95_retrieve_time_ms, (value) => number(value, " ms")],
     ];
+    if (runs.some((run) => run.summary.avg_context_tokens != null)) {
+      metrics.push(["平均召回上下文 Token", (s) => s.avg_context_tokens, tokensText]);
+    }
     if (runs.some((run) => retrievalOnly(run.selection.dataset))) {
       metrics.push(
         ["实际检索用例通过率", (s) => s.active_total ? s.active_passes / s.active_total : null, scoreText, 1],
@@ -493,6 +502,62 @@ function renderRunProgress(job) {
     ? `已用时 ${minutes ? `${minutes} 分 ` : ""}${elapsed % 60} 秒` : "";
 }
 
+function renderContextTokens(job) {
+  const average = job.summary.avg_context_tokens;
+  $("context-token-metric").hidden = average == null;
+  $("avg-context-tokens").textContent = tokensText(average);
+  const details = $("context-tokens");
+  const runId = average != null && job.result_available && !isActive(job) ? job.id : null;
+  details.hidden = !runId;
+  if (runId === contextTokenRunId) return;
+  contextTokenRunId = runId;
+  contextTokenOffset = 0;
+  contextTokenRequest += 1;
+  details.open = false;
+  $("context-tokens-table").hidden = true;
+  $("context-tokens-nav").hidden = true;
+  $("context-tokens-rows").replaceChildren();
+  $("context-tokens-status").textContent = "";
+}
+
+async function loadContextTokenPage(offset) {
+  const id = contextTokenRunId;
+  if (!id || id !== selected) return;
+  const version = ++contextTokenRequest;
+  const status = $("context-tokens-status");
+  $("context-tokens-prev").disabled = true;
+  $("context-tokens-next").disabled = true;
+  status.textContent = "正在读取逐题指标…";
+  try {
+    const { rows, total } = await api(`/runs/${id}/context-tokens?offset=${offset}&limit=${contextTokenPageSize}`);
+    if (id !== selected || version !== contextTokenRequest) return;
+    $("context-tokens-rows").replaceChildren(...rows.map((row) => {
+      const tr = document.createElement("tr");
+      const question = document.createElement("td");
+      question.textContent = row.query || row.query_id;
+      if (row.query) {
+        const ref = document.createElement("small");
+        ref.textContent = row.query_id;
+        question.append(ref);
+      }
+      const count = document.createElement("td");
+      count.textContent = tokensText(row.context_tokens);
+      tr.append(question, count);
+      return tr;
+    }));
+    contextTokenOffset = offset;
+    $("context-tokens-table").hidden = !rows.length;
+    $("context-tokens-nav").hidden = total <= contextTokenPageSize;
+    status.textContent = rows.length ? `${offset + 1}–${offset + rows.length} / ${total} 题` : "暂无逐题 Token 数据。";
+    $("context-tokens-prev").disabled = offset === 0;
+    $("context-tokens-next").disabled = offset + contextTokenPageSize >= total;
+  } catch (error) {
+    if (id !== selected || version !== contextTokenRequest) return;
+    $("context-tokens-nav").hidden = true;
+    status.textContent = error.message;
+  }
+}
+
 async function loadDetail(id) {
   const job = await api(`/runs/${id}`);
   if (id !== selected) return;
@@ -556,6 +621,7 @@ async function loadDetail(id) {
   }
   $("distribution").hidden = !s.total_queries;
   $("distribution-note").hidden = job.selection.dataset !== "beam";
+  renderContextTokens(job);
   $("download").hidden = !job.result_available;
   $("download").href = `/api/runs/${id}/result`;
   $("download").textContent = job.status === "completed" ? "下载结果 JSON" : "下载已保存的部分结果";
@@ -670,6 +736,11 @@ $("connection-reuse").addEventListener("change", () => {
 });
 $("history-prev").addEventListener("click", () => changePage(Math.max(0, historyOffset - pageSize)));
 $("history-next").addEventListener("click", () => changePage(historyOffset + pageSize));
+$("context-tokens").addEventListener("toggle", (event) => {
+  if (event.currentTarget.open) loadContextTokenPage(contextTokenOffset);
+});
+$("context-tokens-prev").addEventListener("click", () => loadContextTokenPage(contextTokenOffset - contextTokenPageSize));
+$("context-tokens-next").addEventListener("click", () => loadContextTokenPage(contextTokenOffset + contextTokenPageSize));
 $("compare-clear").addEventListener("click", () => {
   compareIds.clear();
   drawHistory();

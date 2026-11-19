@@ -112,12 +112,25 @@
               <div><span>平均检索延迟</span><strong id="retrieval"></strong></div>
               <div><span>检索 P95</span><strong id="retrieval-p95"></strong></div>
               <div><span>写入文档数</span><strong id="ingested-docs"></strong></div>
+              <div id="context-token-metric" hidden><span>平均召回上下文 Token</span><strong id="avg-context-tokens"></strong></div>
             </div>
             <figure id="distribution" class="chart" hidden>
               <figcaption id="distribution-label">答题分布</figcaption>
               <div id="distribution-bars"></div>
               <p id="distribution-note" class="hint" hidden>BEAM 单题得分 ≥ 0.5 计为答对。</p>
             </figure>
+            <details id="context-tokens" hidden>
+              <summary>逐题召回上下文 Token</summary>
+              <p id="context-tokens-status" class="hint" role="status"></p>
+              <table class="context-tokens-table" id="context-tokens-table" hidden>
+                <thead><tr><th scope="col">题目</th><th scope="col">Token</th></tr></thead>
+                <tbody id="context-tokens-rows"></tbody>
+              </table>
+              <div class="history-nav" id="context-tokens-nav" hidden>
+                <button id="context-tokens-prev" class="secondary" type="button">上一页</button>
+                <button id="context-tokens-next" class="secondary" type="button">下一页</button>
+              </div>
+            </details>
             <div class="result-links">
               <a id="download" hidden>下载结果 JSON</a>
               <p id="run-error" class="error" role="alert" hidden></p>

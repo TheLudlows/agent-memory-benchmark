@@ -14,9 +14,9 @@ from memory_bench.judge import ScoringError
 from memory_bench.memory.base import MemoryProvider
 from memory_bench.memory.hindsight import HindsightHTTPMemoryProvider
 from memory_bench.memory.mem0_cloud import Mem0CloudMemoryProvider
-from memory_bench.models import Document, QueryResult
+from memory_bench.models import AnswerResult, Document, QueryResult
 from memory_bench.modes.rag import RAGMode
-from memory_bench.runner import EvalRunner
+from memory_bench.runner import EvaluationProgress, EvalRunner
 from memory_bench.workbench import create_app
 
 
@@ -171,7 +171,11 @@ def test_datasets_run_through_local_api_and_worker(monkeypatch, tmp_path, mock_s
             assert client.post("/api/runs", json=selection).status_code == 409
             detail_url, detail = await_result(client, response)
             assert detail["status"] == "completed", detail["log"]
-            assert detail["progress"] == {"stage": "evaluating", "completed": question_count, "total": question_count}
+            document_count = 2 if dataset == "longmemeval" else 1
+            assert detail["progress"] == {
+                "stage": "finalizing", "completed": question_count, "total": question_count,
+                "ingested_docs": document_count, "total_docs": document_count,
+            }
             assert detail["summary"]["score"] == (0.5 if dataset == "beam" else 1.0)
             assert detail["summary"]["judge_llm"] == "openai:judge-stub"
             assert detail["summary"]["ingested_docs"] == (2 if dataset == "longmemeval" else 1)
@@ -482,3 +486,57 @@ def test_workbench_requires_per_run_details_and_never_echoes_key(monkeypatch, tm
         assert invalid.status_code == 422 and "对应的 API 地址" in invalid.json()["detail"]
         assert "saved-round-key" not in invalid.text
         assert client.get("/api/runs").json() == []
+
+
+def test_progress_tracks_parallel_writes_and_answers_independently(monkeypatch, tmp_path):
+    dataset = BEAMDataset()
+    turn = {"role": "user", "content": "Paris"}
+    question = {"question": "Where?", "answer": "Paris"}
+    monkeypatch.setattr(dataset, "_load_raw", lambda split: [
+        {
+            "conversation_id": unit, "chat": [[turn]] * documents,
+            "probing_questions": {"information_extraction": [question]},
+        }
+        for unit, documents in (("first", 2), ("second", 1))
+    ])
+    started_second_write = asyncio.Event()
+    finish_second_write = asyncio.Event()
+
+    class Memory(MemoryProvider):
+        name = "parallel-test"
+        unit_concurrency = 2
+
+        def ingest(self, documents):
+            pytest.fail("expected asynchronous ingestion")
+
+        async def async_ingest(self, documents):
+            if documents[0].user_id == "second":
+                started_second_write.set()
+                await asyncio.wait_for(finish_second_write.wait(), timeout=5)
+
+        def retrieve(self, query, k=10, user_id=None, query_timestamp=None):
+            pytest.fail("the stub answers directly")
+
+    class Judge:
+        model_id = "test-judge"
+
+        def generate(self, prompt, schema):
+            return {"score": 1.0, "reason": "matches"}
+
+    class Mode(RAGMode):
+        async def async_answer(self, query, memory, task_type="open", user_id=None, meta=None):
+            if user_id == "first":
+                await asyncio.wait_for(started_second_write.wait(), timeout=5)
+                finish_second_write.set()
+            return AnswerResult(answer="Paris", reasoning="", context="Paris", retrieve_time_ms=1.0)
+
+    monkeypatch.setattr(dataset, "default_judge_llm", Judge)
+    updates = []
+    runner = EvalRunner(tmp_path, on_progress=updates.append)
+    runner.run(dataset, "100k", Memory(), Mode(Judge()))
+
+    assert updates[0] == EvaluationProgress("ingesting", 0, 2, 0, 3)
+    assert EvaluationProgress("ingesting_and_evaluating", 0, 2, 2, 3) in updates
+    assert [update.completed for update in updates] == sorted(update.completed for update in updates)
+    assert [update.ingested_docs for update in updates] == sorted(update.ingested_docs for update in updates)
+    assert updates[-1] == EvaluationProgress("finalizing", 2, 2, 3, 3)

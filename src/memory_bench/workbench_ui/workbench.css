@@ -113,3 +113,6 @@ ul { list-style: none; padding: 0; margin: 12px 0 0; }
 
 .run-title h3, .history-row > span:first-child { min-width: 0; overflow-wrap: anywhere; }
 #compare-jump { margin-inline-start: 8px; }
+
+.run-progress-row .progress-caption { margin-top: 10px; }
+.run-progress-row progress { margin-top: 3px; }

@@ -2,6 +2,7 @@
 
 import json
 import sys
+from dataclasses import asdict
 from hashlib import sha256
 from math import ceil
 from pathlib import Path
@@ -14,7 +15,7 @@ from .memory import get_memory_provider
 from .memory.hindsight import HindsightHTTPMemoryProvider
 from .memory.mem0_cloud import Mem0CloudMemoryProvider
 from .modes import get_mode
-from .runner import EvalRunner
+from .runner import EvaluationProgress, EvalRunner
 from .workbench import SCORING_INCOMPLETE_EXIT_CODE, RunSelection, _read_json, write_json
 
 
@@ -22,6 +23,8 @@ def run(directory: Path) -> int:
     job = _read_json(directory / "run.json")
     spec = RunSelection.model_validate(job["selection"])
     run_id = job["id"]
+    progress_path = directory / "progress.json"
+    write_json(progress_path, asdict(EvaluationProgress("loading")))
     prefix = f"amb-web-{run_id}-"
     if spec.backend == "hindsight-http":
         memory = HindsightHTTPMemoryProvider(bank_prefix=prefix)
@@ -32,12 +35,11 @@ def run(directory: Path) -> int:
 
     expected_queries = 0
 
-    def progress(stage: str, completed: int, total: int) -> None:
+    def progress(update: EvaluationProgress) -> None:
         nonlocal expected_queries
-        expected_queries = total
-        write_json(directory / "progress.json", {"stage": stage, "completed": completed, "total": total})
+        expected_queries = update.total
+        write_json(progress_path, asdict(update))
 
-    progress("loading", 0, 0)
     runner = EvalRunner(output_dir=directory / "results", on_progress=progress)
     dataset = BEAMDataset(require_local_split=True) if spec.dataset == "beam" else get_dataset(spec.dataset)
     summary = runner.run(

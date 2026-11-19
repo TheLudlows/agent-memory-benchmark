@@ -3,7 +3,7 @@ import json
 import logging
 import time
 from collections.abc import Callable
-from dataclasses import asdict, fields
+from dataclasses import asdict, dataclass, fields
 from pathlib import Path
 from uuid import uuid4
 
@@ -39,10 +39,19 @@ def _score_mcq(answer: str, gold_answers: list[str]) -> tuple[bool, str]:
     return False, f"expected one of {gold_answers!r}, got {answer!r}"
 
 
+@dataclass(frozen=True)
+class EvaluationProgress:
+    stage: str
+    completed: int = 0
+    total: int = 0
+    ingested_docs: int = 0
+    total_docs: int | None = None
+
+
 class EvalRunner:
     def __init__(
         self, output_dir: Path = Path("outputs"),
-        on_progress: Callable[[str, int, int], None] | None = None,
+        on_progress: Callable[[EvaluationProgress], None] | None = None,
     ):
         self.output_dir = output_dir
         self.on_progress = on_progress
@@ -328,14 +337,24 @@ class EvalRunner:
         ingestion_ms = 0.0
         ingested_docs_count = 0
         completed = 0
+        total_docs = 0
+        active_writes = 0
+        active_evaluations = 0
 
-        def report(stage: str, advanced: int = 0) -> None:
+        def report(advanced: int = 0, *, stage: str | None = None) -> None:
             nonlocal completed
             completed += advanced
-            if self.on_progress is not None:
-                self.on_progress(stage, completed, len(queries))
-
-        report("ingesting")
+            if self.on_progress is None:
+                return
+            ingested_for_run = 0 if skip_ingestion else ingested_docs_count
+            if stage is None:
+                if active_writes and active_evaluations:
+                    stage = "ingesting_and_evaluating"
+                elif active_writes or (not active_evaluations and ingested_for_run < total_docs):
+                    stage = "ingesting"
+                else:
+                    stage = "evaluating"
+            self.on_progress(EvaluationProgress(stage, completed, len(queries), ingested_for_run, total_docs))
 
         if dataset.isolation_unit is not None:
             # Unit-sequential mode: ingest one unit's document then answer all its queries
@@ -373,7 +392,9 @@ class EvalRunner:
                 ingested_docs_count = previous.get("ingested_docs", 0)
             else:
                 pending_units = len(docs_by_unit) - len(prev_by_unit)
+                total_docs = sum(len(docs) for uid, docs in docs_by_unit.items() if uid not in prev_by_unit)
                 console.print(f"[dim]Ingesting {pending_units} units into {memory.name} ({getattr(memory, 'unit_concurrency', 1)} at a time)...[/dim]")
+            report()
 
             async def _run_unit_sequential(progress, task_id):
                 nonlocal ingestion_ms, ingested_docs_count
@@ -404,20 +425,23 @@ class EvalRunner:
                     ))
 
                 async def run_unit(unit_id, unit_docs):
-                    nonlocal ingestion_ms, ingested_docs_count
+                    nonlocal ingestion_ms, ingested_docs_count, active_writes, active_evaluations
                     if unit_id in prev_by_unit:
                         progress.advance(task_id, len(prev_by_unit[unit_id]))
-                        report("evaluating", len(prev_by_unit[unit_id]))
+                        report(len(prev_by_unit[unit_id]))
                         return
                     async with unit_sem:
                         if not skip_ingestion:
-                            report("ingesting")
+                            active_writes += 1
+                            report()
                             t0 = time.perf_counter()
-                            await memory.async_ingest(unit_docs)
+                            try:
+                                await memory.async_ingest(unit_docs)
+                            finally:
+                                active_writes -= 1
                             ingestion_ms += (time.perf_counter() - t0) * 1000
                             ingested_docs_count += len(unit_docs)
 
-                        report("evaluating")
                         unit_queries = queries_by_unit.get(unit_id, [])
                         unit_results = [None] * len(unit_queries)
 
@@ -425,10 +449,16 @@ class EvalRunner:
                             async with sem:
                                 unit_results[i] = await _process_one(q)
                                 progress.advance(task_id)
-                                report("evaluating", 1)
+                                report(1)
 
-                        await asyncio.gather(*[bounded(i, q) for i, q in enumerate(unit_queries)])
+                        active_evaluations += 1
+                        report()
+                        try:
+                            await asyncio.gather(*[bounded(i, q) for i, q in enumerate(unit_queries)])
+                        finally:
+                            active_evaluations -= 1
                         results_by_unit[unit_id] = unit_results
+                        report()
                     # Save incrementally after each unit to survive crashes
                     _save_partial()
 
@@ -443,6 +473,8 @@ class EvalRunner:
 
         else:
             # Batch mode: ingest all documents upfront, then answer all queries.
+            total_docs = 0 if skip_ingestion else len(documents)
+            report()
             if skip_ingestion:
                 console.print(f"[dim]Skipping ingestion (--skip-ingestion).[/dim]\n")
                 ingestion_ms = previous.get("ingestion_time_ms", 0.0)
@@ -456,7 +488,7 @@ class EvalRunner:
                 avg = f" ({ingestion_ms / len(documents):.1f}ms/doc avg)" if documents else ""
                 console.print(f"  ingested in {ingestion_ms:.0f}ms{avg}\n")
 
-            report("evaluating")
+            report()
 
             async def _run_all(progress, task_id):
                 concurrency = getattr(memory, "concurrency", _CONCURRENCY)
@@ -467,7 +499,7 @@ class EvalRunner:
                     async with sem:
                         results[i] = await _process_one(q)
                         progress.advance(task_id)
-                        report("evaluating", 1)
+                        report(1)
 
                 await asyncio.gather(*[bounded(i, q) for i, q in enumerate(queries)])
                 return results
@@ -476,6 +508,8 @@ class EvalRunner:
                           TaskProgressColumn(), TimeElapsedColumn(), console=console) as progress:
                 task_id = progress.add_task("Evaluating", total=len(queries))
                 results = asyncio.run(_run_all(progress, task_id))
+
+        report(stage="finalizing")
 
         if show_raw:
             for r in results:

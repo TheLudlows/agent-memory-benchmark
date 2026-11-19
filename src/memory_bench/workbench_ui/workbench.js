@@ -1,7 +1,10 @@
 const $ = (id) => document.getElementById(id);
 const names = { locomo: "LoCoMo", beam: "BEAM", longmemeval: "LongMemEval" };
 const statuses = { running: "运行中", cancelling: "停止中", completed: "已完成", scoring_incomplete: "评分未完成", failed: "失败", cancelled: "已停止", interrupted: "已中断" };
-const stages = { loading: "加载数据集", ingesting: "写入记忆", evaluating: "检索、回答与评分" };
+const stages = {
+  loading: "加载数据集", ingesting: "写入记忆", evaluating: "检索、回答与评分",
+  ingesting_and_evaluating: "同时写入和答题", finalizing: "整理评测结果",
+};
 const isActive = (job) => job && ["running", "cancelling"].includes(job.status);
 const formatDate = (value) => new Date(value).toLocaleString("zh-CN", { hour12: false });
 
@@ -271,6 +274,32 @@ function drawHistory() {
   }));
 }
 
+function renderProgress(row, bar, counter, completed, total, unit) {
+  $(row).hidden = !(total > 0);
+  if ($(row).hidden) return;
+  const done = completed ?? 0;
+  $(bar).max = total;
+  $(bar).value = done;
+  $(counter).textContent = `${done} / ${total} ${unit}（${Math.floor(done * 100 / total)}%）`;
+}
+
+function renderRunProgress(job) {
+  const { stage, completed, total, ingested_docs, total_docs } = job.progress;
+  const active = isActive(job);
+  $("stage").textContent = job.status === "cancelling" ? statuses.cancelling :
+    active ? (stages[stage] || "准备评测") : statuses[job.status];
+  $("loading-progress").hidden = !(active && (!stage || stage === "loading"));
+  renderProgress("ingestion-progress-row", "ingestion-progress", "ingestion-progress-count",
+    ingested_docs, total_docs, "份文档");
+  renderProgress("questions-progress-row", "progress", "progress-count", completed, total, "题");
+
+  const finish = active ? Date.now() : Date.parse(job.ended_at);
+  const elapsed = Math.max(0, Math.floor((finish - Date.parse(job.started_at)) / 1000));
+  const minutes = Math.floor(elapsed / 60);
+  $("elapsed").textContent = Number.isFinite(elapsed)
+    ? `已用时 ${minutes ? `${minutes} 分 ` : ""}${elapsed % 60} 秒` : "";
+}
+
 async function loadDetail(id) {
   const job = await api(`/runs/${id}`);
   if (id !== selected) return;
@@ -288,13 +317,7 @@ async function loadDetail(id) {
   $("status").hidden = false;
   $("cancel").hidden = !isActive(job);
   $("cancel").disabled = job.status === "cancelling";
-  const { stage, total, completed } = job.progress;
-  $("stage").textContent = isActive(job) ? (stages[stage] || "准备评测") : statuses[job.status];
-  $("progress-count").textContent = total ? `${completed} / ${total} 题` : "";
-  $("progress").max = total || 1;
-  if (total || !isActive(job)) $("progress").value = completed || 0;
-  else $("progress").removeAttribute("value");
-  $("progress").hidden = !isActive(job) && !total;
+  renderRunProgress(job);
 
   const s = job.summary;
   $("metrics").hidden = !s.total_queries;

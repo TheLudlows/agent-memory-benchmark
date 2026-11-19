@@ -1,6 +1,6 @@
 const $ = (id) => document.getElementById(id);
 const names = { locomo: "LoCoMo", beam: "BEAM", longmemeval: "LongMemEval" };
-const statuses = { running: "运行中", cancelling: "停止中", completed: "已完成", failed: "失败", cancelled: "已停止", interrupted: "已中断" };
+const statuses = { running: "运行中", cancelling: "停止中", completed: "已完成", scoring_incomplete: "评分未完成", failed: "失败", cancelled: "已停止", interrupted: "已中断" };
 const stages = { loading: "加载数据集", ingesting: "写入记忆", evaluating: "检索、回答与评分" };
 const isActive = (job) => job && ["running", "cancelling"].includes(job.status);
 const formatDate = (value) => new Date(value).toLocaleString("zh-CN", { hour12: false });
@@ -44,7 +44,8 @@ function updateForm() {
   };
   $("backend-help").textContent = descriptions[$("backend").value];
   const missingKeys = [...missing, ...settings.missing_models];
-  setError("config-error", missingKeys.length ? `请在 .env 配置 ${missingKeys.join("、")}` : "");
+  const splitError = settings.split_errors?.[$("dataset").value]?.[$("split").value];
+  setError("config-error", splitError || (missingKeys.length ? `请在 .env 配置 ${missingKeys.join("、")}` : ""));
   for (const role of ["answer", "judge"]) {
     const { provider, model } = settings.models[role];
     const fallback = provider === "gemini" && role === "judge" && $("dataset").value === "beam"
@@ -52,7 +53,7 @@ function updateForm() {
     $(`${role}-model`).textContent = `${provider} · ${model || fallback}`;
   }
   $("limit").disabled = $("full").checked;
-  $("start").disabled = submitting || jobs.some(isActive) || missingKeys.length > 0;
+  $("start").disabled = submitting || jobs.some(isActive) || Boolean(splitError) || missingKeys.length > 0;
   $("start").textContent = submitting ? "正在启动…" : jobs.some(isActive) ? "已有评测运行中" : "开始评测";
 }
 
@@ -114,8 +115,8 @@ async function loadDetail(id) {
   $("metrics").hidden = !s.total_queries;
   if (s.total_queries) {
     $("score-label").textContent = job.selection.dataset === "beam" ? "平均得分" : "准确率";
-    $("score").textContent = `${(s.score * 100).toFixed(1)}%`;
-    $("correct").textContent = `${s.correct} / ${s.total_queries}`;
+    $("score").textContent = s.score == null ? "—" : `${(s.score * 100).toFixed(1)}%`;
+    $("correct").textContent = s.scoring_failed_queries ? "—" : `${s.correct} / ${s.total_queries}`;
     $("ingestion").textContent = `${(s.ingestion_time_ms / 1000).toFixed(1)} s`;
     $("retrieval").textContent = s.avg_retrieve_time_ms == null ? "—" : `${s.avg_retrieve_time_ms.toFixed(1)} ms`;
   }
@@ -124,7 +125,10 @@ async function loadDetail(id) {
   $("download").textContent = job.status === "completed" ? "下载结果 JSON" : "下载已保存的部分结果";
   if (job.status === "failed" && $("log").textContent !== job.log) $("logs").open = true;
   if ($("log").textContent !== job.log) $("log").textContent = job.log;
-  setError("run-error", job.status === "failed" ? "评测进程退出，请查看日志。" : "");
+  const failedScoring = job.status === "scoring_incomplete";
+  setError("run-error", failedScoring
+    ? `${s.scoring_failed_queries} 道题评分失败，未生成总分。可下载已保存的逐题结果。`
+    : job.status === "failed" ? "评测进程退出，请查看日志。" : "");
 }
 
 async function refresh() {
@@ -185,6 +189,7 @@ $("cancel").addEventListener("click", async () => {
 });
 
 $("dataset").addEventListener("change", updateSplits);
+$("split").addEventListener("change", updateForm);
 $("backend").addEventListener("change", updateForm);
 $("full").addEventListener("change", updateForm);
 

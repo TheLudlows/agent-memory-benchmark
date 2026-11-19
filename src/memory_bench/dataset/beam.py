@@ -8,8 +8,7 @@ conversation) across 10 memory ability categories.
 Paper: https://arxiv.org/abs/2510.27246
 
 Data is auto-downloaded from HuggingFace on first use and cached locally.
-Set BEAM_DATA_PATH (for the standard 100K/500K/1M splits) or
-BEAM_10M_DATA_PATH (for the 10M split) to point at a local JSON file.
+Use BEAM_<SPLIT>_DATA_PATH to point at a local JSON file for that split.
 
 Structure
 ---------
@@ -41,6 +40,7 @@ from scipy.stats import kendalltau
 
 from ._cache import dataset_cache_dir, staging_file
 from .base import Dataset
+from ..judge import ScoringError
 from ..models import Document, Query, QueryResult
 from ..llm.base import LLM, Schema
 
@@ -54,6 +54,25 @@ _HF_SPLIT_MAP = {
 }
 
 SPLITS = ["100k", "500k", "1m", "10m"]
+
+
+def local_data_path(split: str, *, require_split: bool = False) -> str | None:
+    path_variable = f"BEAM_{split.upper()}_DATA_PATH"
+    if path := os.getenv(path_variable):
+        return path
+    if split == "10m" or not (legacy_path := os.getenv("BEAM_DATA_PATH")):
+        return None
+    legacy_split = os.getenv("BEAM_DATA_SPLIT", "").strip().lower()
+    if not legacy_split:
+        if require_split:
+            raise ValueError(
+                f"BEAM_DATA_PATH 未指定 split。请设置 BEAM_DATA_SPLIT（100k、500k 或 1m），"
+                f"或改用 {path_variable}。"
+            )
+        return legacy_path
+    if legacy_split not in _HF_SPLIT_MAP:
+        raise ValueError("BEAM_DATA_SPLIT must be 100k, 500k, or 1m.")
+    return legacy_path if split == legacy_split else None
 
 _CATEGORIES = [
     "abstention",
@@ -94,7 +113,7 @@ class BEAMDataset(Dataset):
     BEAM benchmark — long-context memory capabilities.
 
     Data is auto-downloaded from HuggingFace on first use.
-    Set BEAM_DATA_PATH or BEAM_10M_DATA_PATH to point at a local JSON file.
+    Set BEAM_<SPLIT>_DATA_PATH to point at a local JSON file for that split.
     """
 
     name = "beam"
@@ -115,13 +134,15 @@ class BEAMDataset(Dataset):
     # Internal helpers
     # ------------------------------------------------------------------
 
+    def __init__(self, *, require_local_split: bool = False):
+        self._require_local_split = require_local_split
+
     def _cache_path(self, split: str) -> Path:
         cache = dataset_cache_dir("beam")
         return cache / f"{split}.json"
 
     def _load_raw(self, split: str) -> list[dict]:
-        env_key = "BEAM_10M_DATA_PATH" if split == "10m" else "BEAM_DATA_PATH"
-        local = os.environ.get(env_key)
+        local = local_data_path(split, require_split=self._require_local_split)
         if local:
             with open(local, encoding="utf-8") as f:
                 return json.load(f)
@@ -751,18 +772,21 @@ Return JSON: {{"score": <0.0 or 0.5 or 1.0>, "reason": "<one concise sentence>"}
             required=["score", "reason"],
         )
         try:
-            result = llm.generate(prompt, schema)
-            raw = float(result.get("score", 0))
-            # Clamp to nearest valid value
-            if raw >= 0.75:
-                return 1.0
-            elif raw >= 0.25:
-                return 0.5
-            else:
-                return 0.0
-        except Exception as e:
-            logger.warning("Rubric scoring failed: %s", e)
-            return 0.0
+            value = llm.generate(prompt, schema)["score"]
+            if isinstance(value, bool):
+                raise ValueError("Boolean rubric score")
+            raw = float(value)
+            if not 0.0 <= raw <= 1.0:
+                raise ValueError("Rubric score must be between 0 and 1")
+        except Exception as exc:
+            raise ScoringError("BEAM rubric scoring failed") from exc
+
+        # Clamp to nearest valid value.
+        if raw >= 0.75:
+            return 1.0
+        if raw >= 0.25:
+            return 0.5
+        return 0.0
 
     def score_result(self, result: QueryResult, llm: LLM) -> float:
         """Compute a continuous BEAM paper score (0-1) for a query result.

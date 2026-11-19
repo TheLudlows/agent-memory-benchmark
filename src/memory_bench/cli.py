@@ -93,6 +93,11 @@ def run(
     table.add_column("Value", justify="right")
     table.add_row("Total queries", str(summary.total_queries))
     table.add_row("Correct", str(summary.correct))
+    if summary.accuracy is None:
+        table.add_row("Scoring failed", str(summary.scoring_failed_queries))
+        console.print(table)
+        typer.echo("Scoring is incomplete. Partial results were saved without an aggregate score.", err=True)
+        raise typer.Exit(1)
     if summary.score_type == "accuracy":
         table.add_row("Accuracy", f"{summary.accuracy:.1%}")
     else:

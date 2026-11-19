@@ -53,7 +53,7 @@ button:disabled { cursor: default; opacity: .55; }
 .empty.compact { padding: 15px; }
 .status { display: inline-block; padding: 2px 9px; border-radius: 20px; background: #e9edf1; color: #3a4655; font-size: .8rem; white-space: nowrap; }
 .status[data-status=completed] { background: var(--accent-soft); color: #105a4e; }
-.status[data-status=failed] { background: #fce9e7; color: #912d26; }
+.status[data-status=failed], .status[data-status=scoring_incomplete] { background: #fce9e7; color: #912d26; }
 .status[data-status=running], .status[data-status=cancelling] { background: #e6f0fd; color: #23528b; }
 .run-title { margin-top: 16px; }
 .progress-caption { margin-top: 16px; color: var(--muted); font-size: .86rem; }

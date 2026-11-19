@@ -12,13 +12,14 @@ from threading import Lock, Thread
 from typing import Literal
 from uuid import uuid4
 
+from anyio import open_file
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
-from .dataset.beam import SPLITS as BEAM_SPLITS
+from .dataset.beam import SPLITS as BEAM_SPLITS, local_data_path as beam_local_data_path
 from .dataset.locomo import SPLITS as LOCOMO_SPLITS
 from .dataset.longmemeval import SPLITS as LONGMEMEVAL_SPLITS
 
@@ -38,6 +39,7 @@ LLM_KEYS = {
     "groq": ("GROQ_API_KEY",),
 }
 RUN_ID = re.compile(r"[0-9a-f]{32}")
+SCORING_INCOMPLETE_EXIT_CODE = 2
 ASSETS = Path(__file__).with_name("workbench_ui")
 
 
@@ -53,6 +55,15 @@ class RunSelection(BaseModel):
         if self.split not in DATASETS[self.dataset]:
             raise ValueError(f"Split {self.split!r} is unavailable for {self.dataset}.")
         return self
+
+
+def _dataset_error(dataset: str, split: str) -> str | None:
+    if dataset == "beam":
+        try:
+            beam_local_data_path(split, require_split=True)
+        except ValueError as exc:
+            return str(exc)
+    return None
 
 
 def _configured(*keys: str) -> bool:
@@ -118,6 +129,8 @@ class RunManager:
                 write_json(path, {**job, "status": "interrupted", "ended_at": _now()})
 
     def start(self, selection: RunSelection) -> dict:
+        if error := _dataset_error(selection.dataset, selection.split):
+            raise HTTPException(422, error)
         missing = _missing_backend(selection.backend) + _missing_models()
         if missing:
             raise HTTPException(422, "请先在服务器的 .env 中配置 " + "、".join(missing))
@@ -170,10 +183,11 @@ class RunManager:
         finally:
             code = process.wait()
             with self.lock:
-                job.update(
-                    status="cancelled" if self.cancelling else ("completed" if code == 0 else "failed"),
-                    ended_at=_now(), exit_code=code,
-                )
+                if self.cancelling:
+                    status = "cancelled"
+                else:
+                    status = {0: "completed", SCORING_INCOMPLETE_EXIT_CODE: "scoring_incomplete"}.get(code, "failed")
+                job.update(status=status, ended_at=_now(), exit_code=code)
                 try:
                     write_json(directory / "run.json", job)
                 finally:
@@ -220,6 +234,14 @@ def _result_path(directory: Path, job: dict) -> Path:
     return directory / "results" / selection["dataset"] / f"web-{job['id']}" / "rag" / f"{selection['split']}.json"
 
 
+async def _stream_result(path: Path):
+    # Keep one file open for the whole download, even if the runner replaces the
+    # checkpoint. The response does not advertise a size from a separate stat.
+    async with await open_file(path, "rb") as result:
+        while chunk := await result.read(64 * 1024):
+            yield chunk
+
+
 def _log_tail(path: Path) -> str:
     if not path.is_file():
         return ""
@@ -257,6 +279,9 @@ def create_app(output_dir: Path) -> FastAPI:
     def config():
         return {
             "datasets": DATASETS,
+            "split_errors": {"beam": {
+                split: error for split in BEAM_SPLITS if (error := _dataset_error("beam", split))
+            }},
             "backends": {name: {"label": label, "missing": _missing_backend(name)} for name, label in BACKENDS.items()},
             "models": _models(),
             "missing_models": _missing_models(),
@@ -298,6 +323,9 @@ def create_app(output_dir: Path) -> FastAPI:
         if not path.is_file():
             raise HTTPException(404, "当前还没有评测结果。")
         filename = f"{selection['dataset']}-{selection['split']}-{selection['backend']}-{run_id[:8]}.json"
-        return FileResponse(path, filename=filename, media_type="application/json")
+        return StreamingResponse(
+            _stream_result(path), media_type="application/json",
+            headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+        )
 
     return app

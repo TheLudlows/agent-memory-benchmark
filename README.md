@@ -127,8 +127,13 @@ Chat Completions 的 JSON Schema 输出，`OPENAI_BASE_URL` 应包含服务的 A
 
 可选 split 为 LoCoMo `locomo10`、BEAM `100k / 500k / 1m / 10m`、LongMemEval `s`。Compose 镜像
 内置 LoCoMo，首次运行其他数据集时会下载数据。直接运行时可通过 `LOCOMO_DATA_PATH`、
-`BEAM_DATA_PATH`（标准 split）、`BEAM_10M_DATA_PATH`、`LONGMEMEVAL_DATA_PATH` 指定对应的本地数据。
-比较不同后端时，请使用相同的 split、题数和回答及评分模型。
+`LONGMEMEVAL_DATA_PATH` 指定本地数据。BEAM 按 split 使用 `BEAM_100K_DATA_PATH`、
+`BEAM_500K_DATA_PATH`、`BEAM_1M_DATA_PATH` 或 `BEAM_10M_DATA_PATH`。如果评测台继续使用
+`BEAM_DATA_PATH`，需要同时用 `BEAM_DATA_SPLIT` 指明文件所属的标准 split。没有指定本地文件的 split
+会使用对应的官方数据。比较不同后端时，请使用相同的 split、题数和回答及评分模型。
+
+BEAM 的空召回题以 0 分计入平均分。评分服务失败时，运行标为「评分未完成」并显示失败题数。
+导出的 JSON 保留逐题结果，失败题标记为 `scoring_failed`，总分 `accuracy` 为 `null`。
 
 评测台供本机单用户使用，一次运行一个评测。每次运行都有独立的 Hindsight Bank 名称或 Mem0 用户 ID；
 ContextBase 使用预授权的测试 Bank，并以运行和题目所属的隔离单元标签分开数据。停止评测会终止本地

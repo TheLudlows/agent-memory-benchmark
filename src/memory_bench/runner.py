@@ -18,7 +18,7 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(me
 logger = logging.getLogger(__name__)
 
 from .dataset.base import Dataset
-from .judge import GeminiJudge
+from .judge import GeminiJudge, ScoringError
 from .memory.base import MemoryProvider
 from .modes.base import ResponseMode
 from .models import EvalSummary, QueryResult
@@ -230,6 +230,7 @@ class EvalRunner:
             q.meta.update((answer_result.raw_response or {}).get("meta") or {})
 
             score: float | None = None
+            scoring_failed = False
             coding_trajectory = coding_git_history = None
             if task_type == "coding":
                 # The CodingMode already built the repo, ran the agent (with interventions), and graded
@@ -261,6 +262,8 @@ class EvalRunner:
                 score = float(ranked_score[0]) if ranked_score else None
             elif not answer_result.context:
                 correct, judge_reason = False, "empty context — no memories retrieved"
+                if hasattr(dataset, "score_result"):
+                    score = 0.0
             elif task_type == "mcq":
                 correct, judge_reason = _score_mcq(answer_result.answer, q.gold_answers)
             elif hasattr(dataset, "score_result"):
@@ -274,10 +277,15 @@ class EvalRunner:
                     meta=q.meta,
                 )
                 judge_llm = self._get_judge(dataset)._llm
-                score = await asyncio.to_thread(dataset.score_result, tmp_result, judge_llm)
-                score = float(score)
-                correct = score >= 0.5
-                judge_reason = f"score={score:.3f}"
+                try:
+                    score = float(await asyncio.to_thread(dataset.score_result, tmp_result, judge_llm))
+                except ScoringError as exc:
+                    scoring_failed = True
+                    correct, judge_reason = False, str(exc)
+                    logger.warning("[query:%s] %s: %s", q.id, exc, exc.__cause__ or exc)
+                else:
+                    correct = score >= 0.5
+                    judge_reason = f"score={score:.3f}"
             else:
                 # Use per-query judge if dataset supports it (e.g. LongMemEval has per-category prompts)
                 if hasattr(dataset, "get_judge_prompt_fn"):
@@ -303,6 +311,7 @@ class EvalRunner:
                 correct=correct,
                 judge_reason=judge_reason,
                 score=score,
+                scoring_failed=scoring_failed,
                 meta=q.meta,
                 raw_response=None,  # skip storing to conserve disk space
                 trajectory=coding_trajectory,
@@ -344,7 +353,7 @@ class EvalRunner:
                 query_fields = {f.name for f in fields(QueryResult)}
                 for uid in docs_by_unit:
                     unit_queries = queries_by_unit[uid]
-                    if all(q.id in previous_rows for q in unit_queries):
+                    if all(q.id in previous_rows and not previous_rows[q.id].get("scoring_failed") for q in unit_queries):
                         prev_by_unit[uid] = [
                             QueryResult(**{k: v for k, v in previous_rows[q.id].items() if k in query_fields})
                             for q in unit_queries
@@ -379,8 +388,8 @@ class EvalRunner:
                         memory_provider=memory.name, run_name=effective_name,
                         mode=mode.name, oracle=oracle,
                         total_queries=len(done),
-                        correct=sum(1 for r in done if r.correct),
-                        accuracy=0.0, ingestion_time_ms=round(ingestion_ms, 1),
+                        correct=0,
+                        accuracy=None, ingestion_time_ms=round(ingestion_ms, 1),
                         ingested_docs=ingested_docs_count,
                         score_type=dataset.score_type,
                         description=description, answer_llm=mode.llm_id,
@@ -471,13 +480,6 @@ class EvalRunner:
         if only_failed:
             results = self._merge(results, previous_rows)
 
-        correct_count = sum(1 for r in results if r.correct)
-        has_scores = any(r.score is not None for r in results)
-        if has_scores:
-            scored = [r.score for r in results if r.score is not None]
-            accuracy = sum(scored) / len(scored) if scored else 0.0
-        else:
-            accuracy = correct_count / len(results) if results else 0.0
         summary = EvalSummary(
             dataset=dataset.name,
             split=split,
@@ -487,8 +489,8 @@ class EvalRunner:
             mode=mode.name,
             oracle=oracle,
             total_queries=len(results),
-            correct=correct_count,
-            accuracy=accuracy,
+            correct=0,
+            accuracy=None,
             ingestion_time_ms=round(ingestion_ms, 1),
             ingested_docs=ingested_docs_count,
             score_type=dataset.score_type,
@@ -527,6 +529,22 @@ class EvalRunner:
     def _save(self, summary: EvalSummary) -> None:
         path = self._output_path(summary.dataset, summary.split, summary.run_name, summary.mode)
         path.parent.mkdir(parents=True, exist_ok=True)
+        # Normalize empty recalls from older BEAM results when resuming a run.
+        if summary.dataset == "beam":
+            for row in summary.results:
+                if row.score is None and not row.scoring_failed and row.judge_reason.startswith("empty context"):
+                    row.score = 0.0
+
+        summary.total_queries = len(summary.results)
+        summary.correct = sum(row.correct for row in summary.results)
+        summary.scoring_failed_queries = sum(row.scoring_failed for row in summary.results)
+        scored = [row.score for row in summary.results if row.score is not None]
+        if summary.scoring_failed_queries:
+            summary.accuracy = None
+        elif scored:
+            summary.accuracy = sum(scored) / len(scored)
+        else:
+            summary.accuracy = summary.correct / summary.total_queries if summary.total_queries else 0.0
         d = asdict(summary)
         if summary.ingestion_run_id is None:
             del d["ingestion_run_id"]
@@ -543,14 +561,6 @@ class EvalRunner:
         if summary.mode == "coding":
             d["view"] = "agent"   # the UI's multi-turn agent renderer
         results_dicts = d["results"]
-        d["total_queries"] = len(summary.results)
-        d["correct"] = sum(1 for r in summary.results if r.correct)
-        has_scores = any(r.score is not None for r in summary.results)
-        if has_scores:
-            scored = [r.score for r in summary.results if r.score is not None]
-            d["accuracy"] = sum(scored) / len(scored) if scored else 0.0
-        else:
-            d["accuracy"] = d["correct"] / d["total_queries"] if summary.results else 0.0
         rec_times  = [r["retrieve_time_ms"] for r in results_dicts if r.get("retrieve_time_ms") is not None]
         ctx_tokens = [r["context_tokens"]   for r in results_dicts if r.get("context_tokens")   is not None]
         d["avg_retrieve_time_ms"] = round(sum(rec_times)  / len(rec_times),  1) if rec_times  else None

@@ -25,7 +25,6 @@ const modelRoles = { answer: "回答模型", judge: "评分模型" };
 const providerLabels = { gemini: "Gemini", openai: "OpenAI 兼容", groq: "Groq" };
 const modelEditors = {};
 const savingModels = new Set();
-let testingJudge = false;
 
 async function api(path, options) {
   const response = await fetch(`/api${path}`, options);
@@ -142,11 +141,11 @@ function modelHasKey(role, input) {
 
 function updateModelEditor(editor) {
   const input = modelInput(editor);
-  const testing = editor.role === "judge" && testingJudge;
-  const busy = savingModels.has(editor.role) || submitting || testing;
+  const busy = savingModels.has(editor.role) || submitting || editor.testing;
   editor.urlRow.hidden = input.provider !== "openai";
   for (const field of [editor.provider, editor.model, editor.key]) field.disabled = busy;
   editor.url.disabled = busy || editor.urlRow.hidden;
+  editor.bypassProxy.disabled = busy;
   const hasKey = modelHasKey(editor.role, { ...input, api_key: null });
   editor.key.placeholder = hasKey ? "已配置，留空继续使用" : "填写模型 API Key";
   editor.reset.hidden = !settings.models[editor.role].saved;
@@ -154,7 +153,7 @@ function updateModelEditor(editor) {
   const invalid = Boolean(modelInputError(editor, input));
   editor.save.disabled = busy || invalid;
   editor.test.disabled = busy || invalid;
-  editor.test.textContent = testing ? "测试中…" : "测试评分模型";
+  editor.test.textContent = editor.testing ? "测试中…" : `测试${modelRoles[editor.role]}`;
 
   const config = settings.models[editor.role];
   const model = config.model || defaultModel(editor.role, config.provider);
@@ -192,30 +191,33 @@ async function saveModel(editor, reset = false) {
   }
 }
 
-async function testJudgeModel(editor) {
+async function testModel(editor) {
   const input = modelInput(editor);
   if (editor.test.disabled || modelInputError(editor, input)) return;
-  testingJudge = true;
-  setError(editor.message.id, "正在由后台测试评分模型…");
+  const label = modelRoles[editor.role];
+  const bypassProxy = editor.bypassProxy.checked;
+  editor.testing = true;
+  setError(editor.message.id, `正在由后台测试${label}…`);
   updateForm();
   try {
-    const result = await api("/models/judge/test", {
+    const result = await api(`/models/${editor.role}/test`, {
       method: "POST",
       headers: {"Content-Type": "application/json"},
-      body: JSON.stringify(input),
+      body: JSON.stringify({ ...input, bypass_proxy: bypassProxy }),
     });
-    setError(editor.message.id, `评分测试通过 · ${result.model} · ${(result.elapsed_ms / 1000).toFixed(1)} 秒`);
+    const connection = bypassProxy ? " · 直连" : "";
+    setError(editor.message.id, `${label}测试通过 · ${result.model} · ${(result.elapsed_ms / 1000).toFixed(1)} 秒${connection}`);
   } catch (error) {
-    setError(editor.message.id, `评分测试失败。${error.message}`);
+    setError(editor.message.id, `${label}测试失败。${error.message}`);
   } finally {
-    testingJudge = false;
+    editor.testing = false;
     updateForm();
   }
 }
 
 function createModelEditor(role) {
   const template = $("model-editor").content.cloneNode(true);
-  const editor = { role };
+  const editor = { role, testing: false };
   for (const part of template.querySelectorAll("[data-part]")) {
     const name = part.dataset.part;
     part.id = `global-${role}-${name}`;
@@ -238,10 +240,8 @@ function createModelEditor(role) {
       updateForm();
     });
   }
-  if (role === "judge") {
-    editor.test.hidden = false;
-    editor.test.addEventListener("click", () => testJudgeModel(editor));
-  }
+  editor.bypassProxy.addEventListener("change", () => setError(editor.message.id, ""));
+  editor.test.addEventListener("click", () => testModel(editor));
   editor.save.addEventListener("click", () => saveModel(editor));
   editor.reset.addEventListener("click", () => saveModel(editor, true));
   modelEditors[role] = editor;

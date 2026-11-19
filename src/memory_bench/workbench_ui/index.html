@@ -156,8 +156,11 @@
       </div>
       <label data-for="key">模型 API Key</label>
       <input data-part="key" type="password" maxlength="4096" autocomplete="new-password">
+      <label class="check">
+        <input type="checkbox" data-part="bypass-proxy"> 测试时跳过代理
+      </label>
       <div class="connection-actions">
-        <button type="button" class="secondary" data-part="test" hidden>测试评分模型</button>
+        <button type="button" class="secondary" data-part="test">测试模型</button>
         <button type="button" class="secondary" data-part="save">保存默认模型</button>
         <button type="button" class="secondary" data-part="reset">恢复 .env 默认</button>
       </div>

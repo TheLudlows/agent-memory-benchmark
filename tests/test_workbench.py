@@ -54,7 +54,7 @@ def mock_services():
                 if body["model"] == "judge-fail":
                     self.send_json({"error": {"message": "test judge unavailable"}}, status=401)
                     return
-                if body["model"] == "judge-probe-auth":
+                if body["model"].endswith("-probe-auth"):
                     self.send_json({"error": {"message": self.headers.get("Authorization")}}, status=401)
                     return
                 schema = body["response_format"]["json_schema"]["schema"]["properties"]
@@ -62,6 +62,8 @@ def mock_services():
                 values = {"answer": "Paris", "reasoning": "From memory", "score": 1.0, "correct": True, "reason": "Match"}
                 if body["model"] == "judge-probe-invalid":
                     values["correct"] = "true"
+                elif body["model"] == "answer-probe-invalid":
+                    values["answer"] = 42
                 if "What did they say about pets?" in prompt:
                     values["answer"] = "I don't have enough information to answer this question."
                     values["score"] = float(values["answer"] in prompt)
@@ -772,7 +774,13 @@ def test_workbench_keeps_beam_judge_default(monkeypatch, tmp_path):
     assert beam["answer"]["model"] == locomo["judge"]["model"] == "gemini-2.5-flash-lite"
 
 
-def test_workbench_scores_a_probe_on_the_server_with_unsaved_settings(monkeypatch, tmp_path, mock_services):
+@pytest.mark.parametrize(("role", "question", "fields"), [
+    ("answer", "Which city did Lina visit?", ["reasoning", "answer"]),
+    ("judge", "What is 2 + 2?", ["correct", "reason"]),
+])
+def test_workbench_probes_models_on_the_server_with_unsaved_settings(
+    monkeypatch, tmp_path, mock_services, role, question, fields,
+):
     endpoint, calls = mock_services
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
     monkeypatch.setenv("OPENAI_BASE_URL", endpoint + "/environment/v1")
@@ -780,40 +788,59 @@ def test_workbench_scores_a_probe_on_the_server_with_unsaved_settings(monkeypatc
     for name in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy"):
         monkeypatch.delenv(name, raising=False)
 
-    saved = {"provider": "openai", "model": "judge-default", "api_url": endpoint + "/saved/v1", "api_key": "saved-judge-key"}
-    candidate = {"provider": "openai", "model": "judge-candidate", "api_url": endpoint + "/draft/v1", "api_key": "draft-judge-key"}
-    path = "/api/models/judge/test"
+    saved = {"provider": "openai", "model": f"{role}-default", "api_url": endpoint + "/saved/v1", "api_key": f"saved-{role}-key"}
+    candidate = {
+        "provider": "openai", "model": f"{role}-candidate",
+        "api_url": endpoint + "/draft/v1", "api_key": f"draft-{role}-key",
+    }
+    path = f"/api/models/{role}/test"
     with TestClient(create_app(tmp_path / "runs"), base_url="http://127.0.0.1") as client:
-        assert client.post("/api/models/judge", json=saved).status_code == 200
+        assert client.post(f"/api/models/{role}", json=saved).status_code == 200
         assert client.post(path, json={**candidate, "api_key": None}).status_code == 422
         assert client.post(path, json=candidate, headers={"Origin": "https://elsewhere.example"}).status_code == 403
         assert calls == []
 
         response = client.post(path, json=candidate)
         assert response.status_code == 200, response.text
-        assert response.json()["model"] == "openai:judge-candidate"
+        assert response.json()["model"] == f"openai:{role}-candidate"
         assert response.json()["elapsed_ms"] >= 0
         request_path, call = calls.pop()
         assert request_path == "/draft/v1/chat/completions"
-        assert call["model"] == "judge-candidate"
-        assert call["authorization"] == "Bearer draft-judge-key"
-        assert "What is 2 + 2?" in call["messages"][0]["content"]
-        assert call["response_format"]["json_schema"]["schema"]["required"] == ["correct", "reason"]
+        assert call["model"] == candidate["model"]
+        assert call["authorization"] == f"Bearer {candidate['api_key']}"
+        assert question in call["messages"][0]["content"]
+        assert call["response_format"]["json_schema"]["schema"]["required"] == fields
 
         response = client.post(path, json={**saved, "api_key": None})
         assert response.status_code == 200, response.text
         request_path, call = calls.pop()
         assert request_path == "/saved/v1/chat/completions"
-        assert call["authorization"] == "Bearer saved-judge-key"
+        assert call["authorization"] == f"Bearer {saved['api_key']}"
 
-        error = client.post(path, json={**candidate, "model": "judge-probe-auth"})
+        error = client.post(path, json={**candidate, "model": f"{role}-probe-auth"})
         assert error.status_code == 502 and "鉴权失败" in error.json()["detail"]
-        assert "draft-judge-key" not in error.text
-        malformed = client.post(path, json={**candidate, "model": "judge-probe-invalid"})
+        assert candidate["api_key"] not in error.text
+        malformed = client.post(path, json={**candidate, "model": f"{role}-probe-invalid"})
         assert malformed.status_code == 502 and "格式" in malformed.json()["detail"]
-        assert client.get("/api/config").json()["models"]["judge"]["model"] == "judge-default"
+        assert client.get("/api/config").json()["models"][role]["model"] == saved["model"]
         assert client.get("/api/runs").json() == []
 
-        monkeypatch.setattr("memory_bench.workbench.JUDGE_PROBE_TIMEOUT", 0.05)
+        monkeypatch.setattr("memory_bench.workbench.MODEL_PROBE_TIMEOUT", 0.05)
         timeout = client.post(path, json=candidate)
         assert timeout.status_code == 504 and "未完成" in timeout.json()["detail"]
+
+
+def test_workbench_model_probe_can_bypass_environment_proxy(monkeypatch, tmp_path, mock_services):
+    endpoint, calls = mock_services
+    monkeypatch.setenv("PYTHONPATH", str(Path(__file__).resolve().parents[1] / "src"))
+    for name in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "https_proxy", "all_proxy", "NO_PROXY", "no_proxy"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("http_proxy", endpoint)
+    config = {"provider": "openai", "model": "answer-direct", "api_url": f"{endpoint}/v1", "api_key": "probe-key"}
+    path = "/api/models/answer/test"
+    with TestClient(create_app(tmp_path / "runs"), base_url="http://127.0.0.1") as client:
+        assert client.post(path, json={**config, "bypass_proxy": True}).status_code == 200
+        assert calls.pop()[0] == "/v1/chat/completions"
+        assert client.post(path, json=config).status_code == 200
+        assert calls.pop()[0] == f"{endpoint}/v1/chat/completions"
+        assert client.post("/api/models/answer", json={**config, "bypass_proxy": True}).status_code == 422

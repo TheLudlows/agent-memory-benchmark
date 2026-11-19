@@ -2,6 +2,7 @@
 
 import json
 import sys
+from collections.abc import Iterable
 from dataclasses import asdict
 from hashlib import sha256
 from math import ceil
@@ -14,6 +15,7 @@ from .llm import get_answer_llm
 from .memory import get_memory_provider
 from .memory.hindsight import HindsightHTTPMemoryProvider
 from .memory.mem0_cloud import Mem0CloudMemoryProvider
+from .models import Document
 from .modes import get_mode
 from .runner import EvaluationProgress, EvalRunner
 from .workbench import SCORING_INCOMPLETE_EXIT_CODE, RunSelection, _read_json, write_json
@@ -40,7 +42,14 @@ def run(directory: Path) -> int:
         expected_queries = update.total
         write_json(progress_path, asdict(update))
 
-    runner = EvalRunner(output_dir=directory / "results", on_progress=progress)
+    document_digest = sha256()
+
+    def record_documents(documents: Iterable[Document]) -> None:
+        for document in documents:
+            item = json.dumps(asdict(document), ensure_ascii=False, sort_keys=True)
+            document_digest.update((item + "\n").encode("utf-8"))
+
+    runner = EvalRunner(output_dir=directory / "results", on_progress=progress, on_documents=record_documents)
     dataset = BEAMDataset(require_local_split=True) if spec.dataset == "beam" else get_dataset(spec.dataset)
     summary = runner.run(
         dataset=dataset, split=spec.split, memory=memory,
@@ -66,9 +75,11 @@ def run(directory: Path) -> int:
         "scoring_failed_queries": summary.scoring_failed_queries,
         "ingested_docs": summary.ingested_docs,
         "ingestion_time_ms": summary.ingestion_time_ms,
+        "ingestion_wall_time_ms": summary.ingestion_wall_time_ms,
         "avg_retrieve_time_ms": mean(times) if times else None,
         "p95_retrieve_time_ms": times[ceil(0.95 * len(times)) - 1] if times else None,
         "question_fingerprint": question_digest.hexdigest(),
+        "document_fingerprint": document_digest.hexdigest(),
         "answer_llm": summary.answer_llm,
         "judge_llm": summary.judge_llm,
     })

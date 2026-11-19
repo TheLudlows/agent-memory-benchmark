@@ -2,7 +2,7 @@ import asyncio
 import json
 import logging
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from dataclasses import asdict, dataclass, fields
 from pathlib import Path
 from uuid import uuid4
@@ -22,7 +22,7 @@ from .dataset.base import Dataset
 from .judge import GeminiJudge, ScoringError
 from .memory.base import MemoryProvider
 from .modes.base import ResponseMode
-from .models import EvalSummary, QueryResult
+from .models import Document, EvalSummary, QueryResult
 
 console = Console()
 
@@ -52,9 +52,11 @@ class EvalRunner:
     def __init__(
         self, output_dir: Path = Path("outputs"),
         on_progress: Callable[[EvaluationProgress], None] | None = None,
+        on_documents: Callable[[Iterable[Document]], None] | None = None,
     ):
         self.output_dir = output_dir
         self.on_progress = on_progress
+        self.on_documents = on_documents
         self._judge: GeminiJudge | None = None  # built on first use: retrieval runs need no LLM key
         self._dataset_metrics: dict = {}
 
@@ -335,11 +337,19 @@ class EvalRunner:
             )
 
         ingestion_ms = 0.0
+        ingestion_wall_ms = 0.0
+        write_interval_start: float | None = None
         ingested_docs_count = 0
         completed = 0
         total_docs = 0
         active_writes = 0
         active_evaluations = 0
+
+        def ingestion_wall_snapshot() -> float | None:
+            if skip_ingestion:
+                return previous.get("ingestion_wall_time_ms")
+            extra = (time.perf_counter() - write_interval_start) * 1000 if write_interval_start is not None else 0.0
+            return round(ingestion_wall_ms + extra, 1)
 
         def report(advanced: int = 0, *, stage: str | None = None) -> None:
             nonlocal completed
@@ -371,6 +381,8 @@ class EvalRunner:
                 uid = dataset.get_isolation_id(doc)
                 if uid is not None and uid in queries_by_unit:
                     docs_by_unit.setdefault(uid, []).append(doc)
+            if self.on_documents is not None:
+                self.on_documents(doc for group in docs_by_unit.values() for doc in group)
 
             # A unit is reusable only when every selected question has a saved result.
             prev_by_unit: dict[str, list[QueryResult]] = {}
@@ -417,7 +429,7 @@ class EvalRunner:
                         total_queries=len(done),
                         correct=0,
                         accuracy=None, ingestion_time_ms=round(ingestion_ms, 1),
-                        ingested_docs=ingested_docs_count,
+                        ingested_docs=ingested_docs_count, ingestion_wall_time_ms=ingestion_wall_snapshot(),
                         score_type=dataset.score_type,
                         description=description, answer_llm=mode.llm_id,
                         judge_llm=(None if dataset.task_type in ("coding", "retrieval") else self._get_judge(dataset)._llm.model_id),
@@ -425,7 +437,8 @@ class EvalRunner:
                     ))
 
                 async def run_unit(unit_id, unit_docs):
-                    nonlocal ingestion_ms, ingested_docs_count, active_writes, active_evaluations
+                    nonlocal ingestion_ms, ingestion_wall_ms, write_interval_start
+                    nonlocal ingested_docs_count, active_writes, active_evaluations
                     if unit_id in prev_by_unit:
                         progress.advance(task_id, len(prev_by_unit[unit_id]))
                         report(len(prev_by_unit[unit_id]))
@@ -435,11 +448,17 @@ class EvalRunner:
                             active_writes += 1
                             report()
                             t0 = time.perf_counter()
+                            if write_interval_start is None:
+                                write_interval_start = t0
                             try:
                                 await memory.async_ingest(unit_docs)
                             finally:
+                                ended = time.perf_counter()
                                 active_writes -= 1
-                            ingestion_ms += (time.perf_counter() - t0) * 1000
+                                if not active_writes:
+                                    ingestion_wall_ms += (ended - write_interval_start) * 1000
+                                    write_interval_start = None
+                            ingestion_ms += (ended - t0) * 1000
                             ingested_docs_count += len(unit_docs)
 
                         unit_queries = queries_by_unit.get(unit_id, [])
@@ -473,6 +492,8 @@ class EvalRunner:
 
         else:
             # Batch mode: ingest all documents upfront, then answer all queries.
+            if self.on_documents is not None:
+                self.on_documents(documents)
             total_docs = 0 if skip_ingestion else len(documents)
             report()
             if skip_ingestion:
@@ -484,6 +505,7 @@ class EvalRunner:
                 t0 = time.perf_counter()
                 memory.ingest(documents)
                 ingestion_ms = (time.perf_counter() - t0) * 1000
+                ingestion_wall_ms = ingestion_ms
                 ingested_docs_count = len(documents)
                 avg = f" ({ingestion_ms / len(documents):.1f}ms/doc avg)" if documents else ""
                 console.print(f"  ingested in {ingestion_ms:.0f}ms{avg}\n")
@@ -533,6 +555,7 @@ class EvalRunner:
             accuracy=None,
             ingestion_time_ms=round(ingestion_ms, 1),
             ingested_docs=ingested_docs_count,
+            ingestion_wall_time_ms=ingestion_wall_snapshot(),
             score_type=dataset.score_type,
             description=description,
             answer_llm=mode.llm_id,

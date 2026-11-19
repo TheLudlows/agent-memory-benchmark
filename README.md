@@ -102,7 +102,9 @@ uv run amb view
 选中题目对应的会话历史仍会写入。运行详情会显示当前阶段、已用时、已写入的文档数和已处理的题数。
 写入进度每组文档处理完后更新，答题进度逐题更新。结束后可查看得分、写入耗时、平均检索延迟，
 或下载 AMB 逐题结果 JSON。完成的评测会保存得分、题数、写入耗时、文档数、平均检索延迟和检索 P95。
-在「运行历史」勾选 2 至 4 轮，即可用图表对比得分与耗时。页面会提示题目或回答、评分模型不一致的情况。
+在「运行历史」勾选 2 至 4 轮，即可用图表对比得分与耗时。页面会提示题目、写入资料或回答、评分模型不一致的情况。
+新评测的写入实际耗时只统计至少有一个写入任务在执行的时间，并行区间计一次。旧记录保留原累计耗时口径，
+在另一个图表中展示。
 
 1. 复制 `.env.example` 为 `.env`，填写回答和评分模型所用的 API Key。默认两者使用 Gemini。
 2. 启动评测台并打开 http://127.0.0.1:8090：
@@ -123,8 +125,10 @@ uv run amb view
 点击「保存为默认连接」可为后续评测预填地址。也可以通过 `.env` 提供默认值：ContextBase 使用
 `CONTEXTBASE_API_URL`、`CONTEXTBASE_API_TOKEN`、`CONTEXTBASE_BANK_ID`；Mem0 使用 `MEM0_CLOUD_URL`、
 `MEM0_CLOUD_KEY`（或 `MEM0_API_KEY`）；Hindsight 使用 `HINDSIGHT_HTTP_URL`、`HINDSIGHT_HTTP_KEY`。
-页面的「恢复初始配置」会删除该后端保存的连接，再读取这些默认值。网页设置保存在评测台运行目录的
-`.connections.json`，重启后仍可使用。页面只显示 Key 是否已配置，改地址时需要重新填写 Key。
+页面的「恢复初始配置」会删除该后端保存的连接，再读取这些默认值。默认连接保存在结果目录之外，
+直接运行时使用 `~/.config/amb/workbench/`（可用 `AMB_WORKBENCH_CONFIG_DIR` 指定私有配置目录），
+Docker Compose 使用独立的 `amb-workbench-config` 卷。升级后，旧的 `.connections.json` 会自动迁移并从
+结果目录移除。页面只显示 Key 是否已配置，改地址时需要重新填写 Key。
 
 也可以在仓库根目录直接运行 `uv run amb workbench`。本地直跑时，同机 Hindsight 的地址通常是
 `http://127.0.0.1:8888`。Docker 中连接宿主机用 `http://host.docker.internal:8888`，并确保 API

@@ -7,6 +7,7 @@ import subprocess
 import sys
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
+from hashlib import sha256
 from pathlib import Path
 from threading import Lock, Thread
 from typing import Annotated, Literal
@@ -108,11 +109,21 @@ def _read_json(path: Path) -> dict:
         return {}
 
 
+def _connection_settings_path(output_dir: Path) -> Path:
+    configured_dir = os.environ.get("AMB_WORKBENCH_CONFIG_DIR")
+    root = Path(configured_dir).expanduser() if configured_dir else Path.home() / ".config" / "amb" / "workbench"
+    key = sha256(os.fsencode(output_dir)).hexdigest()
+    path = (root / key / "connections.json").resolve()
+    if path.is_relative_to(output_dir):
+        raise ValueError("AMB_WORKBENCH_CONFIG_DIR must be outside the Workbench results directory.")
+    return path
+
+
 class RunManager:
     def __init__(self, root: Path):
         self.root = root.resolve()
         self.root.mkdir(parents=True, exist_ok=True)
-        self.connections = Connections(self.root / ".connections.json")
+        self.connections = Connections(_connection_settings_path(self.root), legacy_path=self.root / ".connections.json")
         self.lock = Lock()
         self.active: tuple[str, subprocess.Popen] | None = None
         self.cancelling = False

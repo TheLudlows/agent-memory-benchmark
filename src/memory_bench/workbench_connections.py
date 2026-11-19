@@ -111,13 +111,21 @@ def _environment_connection(backend: BackendId) -> Connection:
 
 
 class Connections:
-    def __init__(self, path: Path):
+    def __init__(self, path: Path, *, legacy_path: Path | None = None):
         self.path = path
         self.lock = Lock()
-        self.saved: dict[BackendId, Connection] = {}
-        if path.exists():
+        self.saved = self._load(path)
+        if legacy_path is not None and legacy_path.exists():
+            self._write({**self._load(legacy_path), **self.saved})
+            legacy_path.unlink()
+
+    @staticmethod
+    def _load(path: Path) -> dict[BackendId, Connection]:
+        try:
             raw = json.loads(path.read_text(encoding="utf-8"))
-            self.saved = {backend: Connection(**raw[backend]) for backend in BACKENDS if backend in raw}
+        except FileNotFoundError:
+            return {}
+        return {backend: Connection(**raw[backend]) for backend in BACKENDS if backend in raw}
 
     def _get(self, backend: BackendId) -> Connection:
         return self.saved.get(backend) or _environment_connection(backend)
@@ -139,6 +147,7 @@ class Connections:
     def _write(self, connections: dict[BackendId, Connection]) -> None:
         # The file is outside the public assets directory. NamedTemporaryFile creates it with
         # owner-only permissions on POSIX and keeps those permissions after the atomic rename.
+        self.path.parent.mkdir(parents=True, mode=0o700, exist_ok=True)
         data = {name: asdict(connection) for name, connection in connections.items()}
         temporary = None
         try:

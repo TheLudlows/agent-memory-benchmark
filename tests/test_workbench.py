@@ -1,10 +1,12 @@
 import asyncio
+import io
 import json
 import threading
 import time
 from dataclasses import asdict
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from zipfile import ZipFile
 
 import pytest
 from fastapi.testclient import TestClient
@@ -18,6 +20,13 @@ from memory_bench.models import AnswerResult, Document, QueryResult
 from memory_bench.modes.rag import RAGMode
 from memory_bench.runner import EvaluationProgress, EvalRunner
 from memory_bench.workbench import create_app
+
+
+@pytest.fixture(autouse=True)
+def private_workbench_config(monkeypatch, tmp_path):
+    directory = tmp_path / "private-config"
+    monkeypatch.setenv("AMB_WORKBENCH_CONFIG_DIR", str(directory))
+    return directory
 
 
 @pytest.fixture
@@ -155,6 +164,7 @@ def test_datasets_run_through_local_api_and_worker(monkeypatch, tmp_path, mock_s
 
         connection = {"api_url": endpoint, "api_key": "test-bearer-value", "bank_id": "ui-bank"}
         saved_fingerprints = {}
+        document_fingerprints = {}
         for dataset, split, variable, data in fixtures:
             dataset_path = tmp_path / f"{dataset}.json"
             dataset_path.write_text(json.dumps([data]))
@@ -186,6 +196,8 @@ def test_datasets_run_through_local_api_and_worker(monkeypatch, tmp_path, mock_s
             assert metrics["summary"] == detail["summary"] and "log" not in metrics
             assert metrics["summary"]["p95_retrieve_time_ms"] >= 0
             saved_fingerprints[dataset] = metrics["summary"]["question_fingerprint"]
+            document_fingerprints[dataset] = metrics["summary"]["document_fingerprint"]
+            assert metrics["summary"]["ingestion_wall_time_ms"] == metrics["summary"]["ingestion_time_ms"]
             assert "test-bearer-value" not in json.dumps(detail)
             assert "test-bearer-value" not in json.dumps(metrics)
             result = client.get(detail_url + "/result")
@@ -207,6 +219,10 @@ def test_datasets_run_through_local_api_and_worker(monkeypatch, tmp_path, mock_s
         assert len({item["document_id"] for item in ingests[-1]["items"]}) == 2
         assert len(client.get("/api/runs").json()) == len(fixtures)
 
+        beam_path = tmp_path / "beam.json"
+        beam_rows = json.loads(beam_path.read_text())
+        beam_rows[0]["chat"][0][0]["content"] = "The input conversation now says London."
+        beam_path.write_text(json.dumps(beam_rows))
         monkeypatch.setenv("OMB_JUDGE_MODEL", "judge-fail")
         detail_url, detail = await_result(client, client.post("/api/runs", json={
             "name": "BEAM scoring offline", "connection": connection,
@@ -216,6 +232,7 @@ def test_datasets_run_through_local_api_and_worker(monkeypatch, tmp_path, mock_s
         assert detail["summary"]["scoring_failed_queries"] == 3
         assert detail["summary"]["score"] is None
         assert detail["summary"]["question_fingerprint"] == saved_fingerprints["beam"]
+        assert detail["summary"]["document_fingerprint"] != document_fingerprints["beam"]
         assert len(set(saved_fingerprints.values())) == len(fixtures)
         assert client.get("/api/config").json()["backends"]["contextbase"]["api_url"] == endpoint + "/default"
         result = client.get(detail_url + "/result").json()
@@ -321,7 +338,8 @@ def test_beam_rejects_an_invalid_judge_score(payload):
 @pytest.mark.parametrize("replace_on", ["http.response.start", "http.response.body"])
 def test_result_download_during_checkpoint_replacement(tmp_path, replace_on):
     run_id = "0" * 32
-    directory = tmp_path / run_id
+    results = tmp_path / "runs"
+    directory = results / run_id
     path = directory / "results/beam" / f"web-{run_id}" / "rag/100k.json"
     path.parent.mkdir(parents=True)
     (directory / "run.json").write_text(json.dumps({
@@ -331,7 +349,7 @@ def test_result_download_during_checkpoint_replacement(tmp_path, replace_on):
     old = json.dumps({"answer": "a" * 70_000}).encode()
     new = json.dumps({"answer": "b" * 80_000}).encode()
     path.write_bytes(old)
-    app = create_app(tmp_path)
+    app = create_app(results)
     endpoint = next(route.endpoint for route in app.routes if route.path == "/api/runs/{run_id}/result")
 
     async def download():
@@ -408,7 +426,7 @@ def test_beam_can_rejudge_a_legacy_empty_context_abstention(monkeypatch, tmp_pat
     assert summary.results[0].correct
 
 
-def test_workbench_connections_can_be_saved_and_reset(monkeypatch, tmp_path):
+def test_workbench_connections_can_be_saved_and_reset(monkeypatch, tmp_path, private_workbench_config):
     monkeypatch.setenv("HINDSIGHT_HTTP_URL", "http://127.0.0.1:8888/")
     monkeypatch.setenv("HINDSIGHT_HTTP_KEY", "environment-secret")
     monkeypatch.delenv("MEM0_CLOUD_KEY", raising=False)
@@ -452,8 +470,9 @@ def test_workbench_connections_can_be_saved_and_reset(monkeypatch, tmp_path):
         reset = client.post(config_path + "/reset").json()
         assert reset["api_url"] == "http://127.0.0.1:8888" and not reset["saved"]
         assert reset["has_key"]
-        storage = directory / ".connections.json"
+        storage, = private_workbench_config.glob("*/connections.json")
         assert "new-hindsight-secret" not in storage.read_text(encoding="utf-8")
+        assert not (directory / ".connections.json").exists()
 
 
 def test_mem0_client_uses_configured_host(monkeypatch):
@@ -501,6 +520,12 @@ def test_progress_tracks_parallel_writes_and_answers_independently(monkeypatch, 
     ])
     started_second_write = asyncio.Event()
     finish_second_write = asyncio.Event()
+    clock = 0.0
+
+    def perf_counter():
+        return clock
+
+    monkeypatch.setattr("memory_bench.runner.time.perf_counter", perf_counter)
 
     class Memory(MemoryProvider):
         name = "parallel-test"
@@ -510,9 +535,14 @@ def test_progress_tracks_parallel_writes_and_answers_independently(monkeypatch, 
             pytest.fail("expected asynchronous ingestion")
 
         async def async_ingest(self, documents):
+            nonlocal clock
             if documents[0].user_id == "second":
                 started_second_write.set()
                 await asyncio.wait_for(finish_second_write.wait(), timeout=5)
+                clock = 0.2
+            else:
+                await asyncio.wait_for(started_second_write.wait(), timeout=5)
+                clock = 0.15
 
         def retrieve(self, query, k=10, user_id=None, query_timestamp=None):
             pytest.fail("the stub answers directly")
@@ -533,10 +563,50 @@ def test_progress_tracks_parallel_writes_and_answers_independently(monkeypatch, 
     monkeypatch.setattr(dataset, "default_judge_llm", Judge)
     updates = []
     runner = EvalRunner(tmp_path, on_progress=updates.append)
-    runner.run(dataset, "100k", Memory(), Mode(Judge()))
+    summary = runner.run(dataset, "100k", Memory(), Mode(Judge()))
 
     assert updates[0] == EvaluationProgress("ingesting", 0, 2, 0, 3)
     assert EvaluationProgress("ingesting_and_evaluating", 0, 2, 2, 3) in updates
     assert [update.completed for update in updates] == sorted(update.completed for update in updates)
     assert [update.ingested_docs for update in updates] == sorted(update.ingested_docs for update in updates)
     assert updates[-1] == EvaluationProgress("finalizing", 2, 2, 3, 3)
+    assert summary.ingestion_time_ms == 350.0
+    assert summary.ingestion_wall_time_ms == 200.0
+
+
+def test_workbench_migrates_legacy_credentials_out_of_results(tmp_path, private_workbench_config):
+    results = tmp_path / "amb-results" / "workbench"
+    legacy = results / ".connections.json"
+    results.mkdir(parents=True)
+    key = "mock-key-used-for-migration"
+    legacy.write_text(json.dumps({
+        "contextbase": {"api_url": "https://example.test", "api_key": key, "bank_id": "test-bank"},
+    }), encoding="utf-8")
+
+    with TestClient(create_app(results), base_url="http://127.0.0.1") as client:
+        config = client.get("/api/config")
+        saved = config.json()["backends"]["contextbase"]
+        assert saved["has_key"] and saved["saved"]
+        assert saved["api_url"] == "https://example.test" and saved["bank_id"] == "test-bank"
+        assert key not in config.text
+    assert not legacy.exists()
+    private, = private_workbench_config.glob("*/connections.json")
+    assert json.loads(private.read_text(encoding="utf-8"))["contextbase"]["api_key"] == key
+
+    archive = io.BytesIO()
+    with ZipFile(archive, "w") as exported:
+        for path in results.parent.rglob("*"):
+            if path.is_file():
+                exported.write(path, path.relative_to(results.parent))
+    with ZipFile(archive) as exported:
+        assert all(key.encode() not in exported.read(name) for name in exported.namelist())
+
+    with TestClient(create_app(results), base_url="http://127.0.0.1") as restarted:
+        assert restarted.get("/api/config").json()["backends"]["contextbase"] == saved
+
+
+def test_workbench_refuses_config_directory_inside_results(monkeypatch, tmp_path):
+    results = tmp_path / "runs"
+    monkeypatch.setenv("AMB_WORKBENCH_CONFIG_DIR", str(results / "config"))
+    with pytest.raises(ValueError, match="outside the Workbench results directory"):
+        create_app(results)

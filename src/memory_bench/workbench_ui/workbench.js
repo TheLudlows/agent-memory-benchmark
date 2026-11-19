@@ -171,20 +171,29 @@ function bars(container, rows, maximum, format) {
 }
 
 function comparisonWarning(runs) {
-  const first = runs[0];
-  const questionMismatch = runs.some((run) =>
-    run.selection.dataset !== first.selection.dataset ||
-    run.selection.split !== first.selection.split ||
-    run.summary.total_queries !== first.summary.total_queries ||
-    (first.summary.question_fingerprint && run.summary.question_fingerprint &&
-      run.summary.question_fingerprint !== first.summary.question_fingerprint));
-  const modelMismatch = runs.some((run) => ["answer_llm", "judge_llm"].some((role) =>
-    run.summary[role] !== first.summary[role]));
-  if (questionMismatch || modelMismatch) return "所选评测的题目或模型不同，分数不可直接比较。";
-  if (runs.some((run) => !run.summary.question_fingerprint))
-    return "部分历史评测没有题目指纹，无法确认题目完全一致。";
-  return "题目、回答模型和评分模型一致。";
+  const differs = (values) => new Set(values.filter((value) => value != null && value !== "")).size > 1;
+  const questions = runs.map((run) => run.summary.question_fingerprint);
+  const documents = runs.map((run) => run.summary.document_fingerprint);
+  const answerModels = runs.map((run) => run.summary.answer_llm);
+  const judgeModels = runs.map((run) => run.summary.judge_llm);
+  const selectionDiffers = ["dataset", "split"].some((key) => differs(runs.map((run) => run.selection[key])));
+  const mismatches = [];
+  if (selectionDiffers || differs(questions) || differs(runs.map((run) => run.summary.total_queries))) {
+    mismatches.push("题目");
+  }
+  if (differs(documents)) mismatches.push("写入资料");
+  if (differs(answerModels)) mismatches.push("回答模型");
+  if (differs(judgeModels)) mismatches.push("评分模型");
+  const missing = [questions, documents, answerModels, judgeModels].some((values) => values.some((value) => !value));
+  const unknown = "部分评测缺少题目、写入资料或模型信息，无法确认这些评测的口径。";
+  if (mismatches.length) {
+    return `${mismatches.join("、")}不同，分数不可直接比较。` + (missing ? unknown : "");
+  }
+  return missing ? unknown : "题目、写入资料、回答模型和评分模型一致。";
 }
+
+const wallWriteTime = (summary) => summary.ingestion_wall_time_ms;
+const legacyWriteTime = (summary) => wallWriteTime(summary) == null ? summary.ingestion_time_ms : null;
 
 async function drawComparison() {
   const version = ++comparisonVersion;
@@ -212,18 +221,24 @@ async function drawComparison() {
       $("compare-meta").append(item);
     }
     const metrics = [
-      [runs.every((run) => run.selection.dataset === "beam") ? "平均得分" : "得分 / 准确率", "score", scoreText, 1],
-      ["平均检索延迟", "avg_retrieve_time_ms", (value) => number(value, " ms")],
-      ["检索 P95", "p95_retrieve_time_ms", (value) => number(value, " ms")],
-      ["写入耗时", "ingestion_time_ms", seconds],
+      [runs.every((run) => run.selection.dataset === "beam") ? "平均得分" : "得分 / 准确率",
+        (s) => s.score, scoreText, 1],
+      ["平均检索延迟", (s) => s.avg_retrieve_time_ms, (value) => number(value, " ms")],
+      ["检索 P95", (s) => s.p95_retrieve_time_ms, (value) => number(value, " ms")],
     ];
-    for (const [label, key, format, max] of metrics) {
+    if (runs.some((run) => wallWriteTime(run.summary) != null)) {
+      metrics.push(["写入实际耗时", wallWriteTime, seconds]);
+    }
+    if (runs.some((run) => legacyWriteTime(run.summary) != null)) {
+      metrics.push(["累计写入耗时（旧口径）", legacyWriteTime, seconds]);
+    }
+    for (const [label, metric, format, max] of metrics) {
       const figure = document.createElement("figure");
       figure.className = "chart";
       const caption = document.createElement("figcaption");
       caption.textContent = label;
       const content = document.createElement("div");
-      const rows = runs.map((run, i) => [`${i + 1}. ${title(run)}`, run.summary[key]]);
+      const rows = runs.map((run, i) => [`${i + 1}. ${title(run)}`, metric(run.summary)]);
       bars(content, rows, max ?? Math.max(1, ...rows.map(([, value]) => value ?? 0)), format);
       figure.append(caption, content);
       $("compare-charts").append(figure);
@@ -325,7 +340,8 @@ async function loadDetail(id) {
     $("score-label").textContent = job.selection.dataset === "beam" ? "平均得分" : "准确率";
     $("score").textContent = scoreText(s.score);
     $("correct").textContent = s.scoring_failed_queries ? "—" : `${s.correct} / ${s.total_queries}`;
-    $("ingestion").textContent = seconds(s.ingestion_time_ms);
+    $("ingestion-label").textContent = wallWriteTime(s) == null ? "累计写入耗时（旧口径）" : "写入实际耗时";
+    $("ingestion").textContent = seconds(wallWriteTime(s) ?? legacyWriteTime(s));
     $("retrieval").textContent = number(s.avg_retrieve_time_ms, " ms");
     $("retrieval-p95").textContent = number(s.p95_retrieve_time_ms, " ms");
     $("ingested-docs").textContent = s.ingested_docs ?? "—";

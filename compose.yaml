@@ -14,3 +14,27 @@ services:
       - host.docker.internal:host-gateway
     volumes:
       - ./amb-results:/app/outputs
+
+  amb-web:
+    profiles: ["web"]
+    build:
+      context: .
+      target: workbench
+    init: true
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      HINDSIGHT_HTTP_URL: ${HINDSIGHT_HTTP_URL:-http://host.docker.internal:8888}
+    extra_hosts:
+      - host.docker.internal:host-gateway
+    ports:
+      - "127.0.0.1:8090:8090"
+    volumes:
+      - ./amb-results:/app/outputs
+      - amb-datasets:/app/.datasets
+      - amb-hf-cache:/root/.cache/huggingface
+
+volumes:
+  amb-datasets:
+  amb-hf-cache:

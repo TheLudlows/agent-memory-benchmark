@@ -95,6 +95,46 @@ uv run amb dataset-stats --dataset personamem
 uv run amb view
 ```
 
+### AMB Workbench · 浏览器评测
+
+评测台可搭配 LoCoMo、BEAM 或 LongMemEval 和 ContextBase、Mem0 Cloud 或 Hindsight HTTP。
+在页面选择数据集、split 和后端，默认跑 5 题，也可跑全量。题数上限只限制问答，
+选中题目对应的会话历史仍会写入。运行时可看进度和日志，结束后可查看得分、写入耗时、平均检索延迟，
+或下载 AMB 逐题结果 JSON。
+
+1. 复制 `.env.example` 为 `.env`，填写回答和评分模型所用的 API Key。默认两者使用 Gemini。
+2. 在同一份 `.env` 中配置要使用的后端：
+
+   | 后端 | 配置 |
+   |---|---|
+   | ContextBase | `CONTEXTBASE_API_URL`、`CONTEXTBASE_API_TOKEN` 和已授权的 `CONTEXTBASE_BANK_ID` |
+   | Mem0 Cloud | `MEM0_CLOUD_KEY`（或 `MEM0_API_KEY`） |
+   | Hindsight HTTP | `HINDSIGHT_HTTP_URL`，开启鉴权时填 `HINDSIGHT_HTTP_KEY` |
+
+3. 启动浏览器评测台并打开 http://127.0.0.1:8090：
+
+   ```sh
+   docker compose up --build amb-web
+   ```
+
+也可以在仓库根目录直接运行 `uv run amb workbench`。本地直跑时，同机 Hindsight 的地址通常是
+`http://127.0.0.1:8888`。Docker 中连接宿主机用 `http://host.docker.internal:8888`，并确保 API
+监听容器可访问的地址。
+
+使用 OpenAI 兼容模型服务时，将 `OMB_ANSWER_LLM` 和 `OMB_JUDGE_LLM` 设置为 `openai`，并配置
+`OPENAI_BASE_URL`、`OPENAI_API_KEY`、`OMB_ANSWER_MODEL` 和 `OMB_JUDGE_MODEL`。模型端点需要支持
+Chat Completions 的 JSON Schema 输出，`OPENAI_BASE_URL` 应包含服务的 API 前缀（通常是 `/v1`）。ContextBase 和 Hindsight 在各自服务内配置写入和检索使用的模型。
+
+可选 split 为 LoCoMo `locomo10`、BEAM `100k / 500k / 1m / 10m`、LongMemEval `s`。Compose 镜像
+内置 LoCoMo，首次运行其他数据集时会下载数据。直接运行时可通过 `LOCOMO_DATA_PATH`、
+`BEAM_DATA_PATH`（标准 split）、`BEAM_10M_DATA_PATH`、`LONGMEMEVAL_DATA_PATH` 指定对应的本地数据。
+比较不同后端时，请使用相同的 split、题数和回答及评分模型。
+
+评测台供本机单用户使用，一次运行一个评测。每次运行都有独立的 Hindsight Bank 名称或 Mem0 用户 ID；
+ContextBase 使用预授权的测试 Bank，并以运行和题目所属的隔离单元标签分开数据。停止评测会终止本地
+评测进程，之前已提交给后端的写入可能仍在处理。历史、日志和结果均保存在
+`amb-results/workbench/`（Compose）或 `outputs/workbench/`（直接运行）。
+
 ### LoCoMo on ContextBase
 
 Use a dedicated empty test Bank and a ContextBase business API key with read/write

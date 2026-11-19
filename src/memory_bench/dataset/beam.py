@@ -39,7 +39,7 @@ from rich.console import Console
 from rich.table import Table
 from scipy.stats import kendalltau
 
-from ._cache import dataset_cache_dir
+from ._cache import dataset_cache_dir, staging_file
 from .base import Dataset
 from ..models import Document, Query, QueryResult
 from ..llm.base import LLM, Schema
@@ -128,7 +128,9 @@ class BEAMDataset(Dataset):
 
         path = self._cache_path(split)
         if not path.exists():
-            self._download(split, path)
+            with staging_file(path) as temporary:
+                self._download(split, temporary)
+            print(f"Cached to {path}")
 
         with open(path, encoding="utf-8") as f:
             return json.load(f)
@@ -153,7 +155,6 @@ class BEAMDataset(Dataset):
         data = [dict(row) for row in ds]
         with open(dest, "w", encoding="utf-8") as f:
             json.dump(data, f)
-        print(f"Cached to {dest}")
 
     @staticmethod
     def _parse_probing_questions(item: dict) -> dict[str, list[dict]]:
@@ -433,6 +434,11 @@ class BEAMDataset(Dataset):
         # Judged with gemini-3.5-flash by default (more reliable rubric scoring than
         # 2.5-flash-lite). The judge moves the score, so a comparison across runs has to
         # pin it: OMB_JUDGE_MODEL scores a run with the judge an earlier one used.
+        if os.environ.get("OMB_JUDGE_LLM", "gemini") != "gemini":
+            from ..llm import get_judge_llm
+
+            return get_judge_llm()
+
         from ..llm.gemini import GeminiLLM
         return GeminiLLM(os.environ.get("OMB_JUDGE_MODEL") or "gemini-3.5-flash")
 

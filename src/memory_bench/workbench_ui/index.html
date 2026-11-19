@@ -1,0 +1,92 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>AMB · 记忆评测</title>
+  <link rel="stylesheet" href="/assets/workbench.css">
+  <script src="/assets/workbench.js" defer></script>
+</head>
+<body>
+  <header class="top">
+    <div class="top-inner">
+      <div class="brand"><span class="brand-mark">AMB</span><span>Agent Memory Benchmark</span></div>
+      <span class="top-note">本地评测</span>
+    </div>
+  </header>
+  <main>
+    <div class="intro">
+      <h1>记忆评测</h1>
+      <p>选择数据集和记忆后端，运行评测并查看评分、耗时和日志。</p>
+    </div>
+    <div class="workspace">
+      <section class="panel setup">
+        <h2>新建评测</h2>
+        <form id="run-form">
+          <label for="dataset">数据集</label>
+          <select id="dataset" name="dataset" required></select>
+          <label for="split">数据集分组</label>
+          <select id="split" name="split" required></select>
+          <label for="backend">记忆后端</label>
+          <select id="backend" name="backend" required></select>
+          <p class="hint" id="backend-help"></p>
+          <label for="limit">题目数</label>
+          <div class="limit-row">
+            <input id="limit" name="limit" type="number" min="1" step="1" value="5" required>
+            <label class="check"><input id="full" type="checkbox"> 跑全量</label>
+          </div>
+          <p class="hint">限制题数时，仍会写入所选题目对应的会话历史。</p>
+          <div class="models">
+            <div><span>回答模型</span><strong id="answer-model">—</strong></div>
+            <div><span>评分模型</span><strong id="judge-model">—</strong></div>
+          </div>
+          <p id="config-error" class="error" hidden></p>
+          <button id="start" class="primary" type="submit" disabled>开始评测</button>
+          <p role="alert" id="form-error" class="error" hidden></p>
+        </form>
+      </section>
+
+      <div class="details">
+        <section class="panel current">
+          <div class="section-head">
+            <h2>运行详情</h2>
+            <span id="status" class="status" hidden></span>
+          </div>
+          <div id="empty" class="empty">开启一次评测，或从下方历史记录选择已有运行。</div>
+          <div id="run-detail" hidden>
+            <div class="run-title">
+              <div>
+                <h3 id="run-name"></h3>
+                <p id="run-meta" class="hint"></p>
+              </div>
+              <button type="button" id="cancel" class="secondary" hidden>停止评测</button>
+            </div>
+            <div class="progress-caption"><span id="stage"></span><span id="progress-count"></span></div>
+            <progress id="progress" aria-label="已完成题数" max="1"></progress>
+            <div class="metrics" id="metrics" hidden>
+              <div><span id="score-label">准确率</span><strong id="score"></strong></div>
+              <div><span>答对 / 总题数</span><strong id="correct"></strong></div>
+              <div><span>写入耗时</span><strong id="ingestion"></strong></div>
+              <div><span>平均检索延迟</span><strong id="retrieval"></strong></div>
+            </div>
+            <div class="result-links">
+              <a id="download" hidden>下载结果 JSON</a>
+              <p id="run-error" class="error" role="alert" hidden></p>
+            </div>
+            <details id="logs">
+              <summary>评测日志</summary>
+              <pre id="log"></pre>
+            </details>
+          </div>
+        </section>
+
+        <section class="panel history">
+          <div class="section-head"><h2>运行历史</h2></div>
+          <p class="empty compact" id="history-empty">暂无运行记录。</p>
+          <ul id="history"></ul>
+        </section>
+      </div>
+    </div>
+  </main>
+</body>
+</html>

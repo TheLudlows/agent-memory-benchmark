@@ -2,6 +2,7 @@ import asyncio
 import json
 import logging
 import time
+from collections.abc import Callable
 from dataclasses import asdict, fields
 from pathlib import Path
 from uuid import uuid4
@@ -38,17 +39,18 @@ def _score_mcq(answer: str, gold_answers: list[str]) -> tuple[bool, str]:
 
 
 class EvalRunner:
-    def __init__(self, output_dir: Path = Path("outputs")):
+    def __init__(
+        self, output_dir: Path = Path("outputs"),
+        on_progress: Callable[[str, int, int], None] | None = None,
+    ):
         self.output_dir = output_dir
+        self.on_progress = on_progress
         self._judge: GeminiJudge | None = None  # built on first use: retrieval runs need no LLM key
         self._dataset_metrics: dict = {}
 
     def _get_judge(self, dataset: Dataset) -> "GeminiJudge":
-        dataset_llm = dataset.default_judge_llm() if hasattr(dataset, "default_judge_llm") else None
-        if dataset_llm is not None:
-            return GeminiJudge(llm=dataset_llm)
         if self._judge is None:
-            self._judge = GeminiJudge()
+            self._judge = GeminiJudge(llm=dataset.default_judge_llm())
         return self._judge
 
     def run(
@@ -74,6 +76,7 @@ class EvalRunner:
     ) -> EvalSummary:
         effective_name = run_name or memory.name
         self._dataset_metrics = {}
+        self._judge = None
         cat_label = f"  [bold]Category:[/bold] {category}" if category else ""
         name_label = f"  [bold]Run:[/bold] {effective_name}" if run_name else ""
         console.print(f"\n[bold]Dataset:[/bold] {dataset.name}  [bold]Split:[/bold] {split}{cat_label}  [bold]Memory:[/bold] {memory.name}{name_label}  [bold]Mode:[/bold] {mode.name}\n")
@@ -309,6 +312,15 @@ class EvalRunner:
 
         ingestion_ms = 0.0
         ingested_docs_count = 0
+        completed = 0
+
+        def report(stage: str, advanced: int = 0) -> None:
+            nonlocal completed
+            completed += advanced
+            if self.on_progress is not None:
+                self.on_progress(stage, completed, len(queries))
+
+        report("ingesting")
 
         if dataset.isolation_unit is not None:
             # Unit-sequential mode: ingest one unit's document then answer all its queries
@@ -380,14 +392,17 @@ class EvalRunner:
                     nonlocal ingestion_ms, ingested_docs_count
                     if unit_id in prev_by_unit:
                         progress.advance(task_id, len(prev_by_unit[unit_id]))
+                        report("evaluating", len(prev_by_unit[unit_id]))
                         return
                     async with unit_sem:
                         if not skip_ingestion:
+                            report("ingesting")
                             t0 = time.perf_counter()
                             await memory.async_ingest(unit_docs)
                             ingestion_ms += (time.perf_counter() - t0) * 1000
                             ingested_docs_count += len(unit_docs)
 
+                        report("evaluating")
                         unit_queries = queries_by_unit.get(unit_id, [])
                         unit_results = [None] * len(unit_queries)
 
@@ -395,6 +410,7 @@ class EvalRunner:
                             async with sem:
                                 unit_results[i] = await _process_one(q)
                                 progress.advance(task_id)
+                                report("evaluating", 1)
 
                         await asyncio.gather(*[bounded(i, q) for i, q in enumerate(unit_queries)])
                         results_by_unit[unit_id] = unit_results
@@ -425,6 +441,8 @@ class EvalRunner:
                 avg = f" ({ingestion_ms / len(documents):.1f}ms/doc avg)" if documents else ""
                 console.print(f"  ingested in {ingestion_ms:.0f}ms{avg}\n")
 
+            report("evaluating")
+
             async def _run_all(progress, task_id):
                 concurrency = getattr(memory, "concurrency", _CONCURRENCY)
                 sem = asyncio.Semaphore(concurrency)
@@ -434,6 +452,7 @@ class EvalRunner:
                     async with sem:
                         results[i] = await _process_one(q)
                         progress.advance(task_id)
+                        report("evaluating", 1)
 
                 await asyncio.gather(*[bounded(i, q) for i, q in enumerate(queries)])
                 return results

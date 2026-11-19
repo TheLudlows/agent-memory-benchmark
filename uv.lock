@@ -246,6 +246,12 @@ http-runner = [
     { name = "tiktoken" },
     { name = "typer" },
 ]
+workbench = [
+    { name = "datasets" },
+    { name = "fastapi" },
+    { name = "mem0ai" },
+    { name = "uvicorn" },
+]
 
 [package.metadata]
 requires-dist = [
@@ -284,6 +290,12 @@ http-runner = [
     { name = "scipy" },
     { name = "tiktoken" },
     { name = "typer" },
+]
+workbench = [
+    { name = "datasets" },
+    { name = "fastapi" },
+    { name = "mem0ai" },
+    { name = "uvicorn" },
 ]
 
 [[package]]

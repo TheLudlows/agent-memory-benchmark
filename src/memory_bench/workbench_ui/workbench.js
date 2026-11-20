@@ -25,7 +25,6 @@ let selected;
 let jobs = [];
 let historyOffset = 0;
 let hasNextPage = false;
-let activeJob = false;
 let submitting = false;
 let questionCountVersion = 0;
 let contextTokenRunId;
@@ -303,8 +302,8 @@ function updateForm() {
     $(id).disabled = submitting;
   }
   $("connection-url").disabled = submitting || Boolean(saved);
-  $("start").disabled = submitting || savingModels.size > 0 || activeJob || !ready || Boolean(splitError || modelError);
-  $("start").textContent = submitting ? "正在启动…" : activeJob ? "已有评测运行中" : "开始评测";
+  $("start").disabled = submitting || savingModels.size > 0 || !ready || Boolean(splitError || modelError);
+  $("start").textContent = submitting ? "正在启动…" : "开始评测";
 }
 
 function runType(job) {
@@ -706,12 +705,8 @@ async function loadDetail(id) {
 
 async function refresh() {
   const offset = historyOffset;
-  const [page, newest] = await Promise.all([
-    api(`/runs?limit=${pageSize + 1}&offset=${offset}`),
-    offset ? api("/runs?limit=1") : Promise.resolve(null),
-  ]);
+  const page = await api(`/runs?limit=${pageSize + 1}&offset=${offset}`);
   if (offset !== historyOffset) return;
-  activeJob = isActive((newest || page)[0]);
   hasNextPage = page.length > pageSize;
   const updated = page.slice(0, pageSize);
   if (!selected && updated.length) selected = updated[0].id;
@@ -776,12 +771,13 @@ $("run-form").addEventListener("submit", async (event) => {
 });
 
 $("cancel").addEventListener("click", async () => {
+  const runId = selected;
   $("cancel").disabled = true;
   try {
-    await api(`/runs/${selected}/cancel`, { method: "POST" });
+    await api(`/runs/${runId}/cancel`, { method: "POST" });
     await refresh();
   } catch (error) {
-    setError("run-error", error.message);
+    if (runId === selected) setError("run-error", error.message);
   }
 });
 

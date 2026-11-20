@@ -7,6 +7,7 @@ import subprocess
 import sys
 from collections.abc import Iterable
 from contextlib import asynccontextmanager
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from functools import lru_cache
 from hashlib import sha256
@@ -120,6 +121,13 @@ def _settings_path(output_dir: Path, filename: str) -> Path:
     return path
 
 
+@dataclass
+class ActiveRun:
+    process: subprocess.Popen
+    monitor: Thread
+    cancelling: bool = False
+
+
 class RunManager:
     def __init__(self, root: Path):
         self.root = root.resolve()
@@ -129,8 +137,7 @@ class RunManager:
         )
         self.models = ModelSettings(_settings_path(self.root, "models.json"))
         self.lock = Lock()
-        self.active: tuple[str, subprocess.Popen] | None = None
-        self.cancelling = False
+        self.active: dict[str, ActiveRun] = {}
         for path in self.root.glob("*/run.json"):
             job = _read_json(path)
             if job.get("status") in {"running", "cancelling"}:
@@ -140,8 +147,6 @@ class RunManager:
         if error := _dataset_error(selection.dataset, selection.split):
             raise HTTPException(422, error)
         with self.lock:
-            if self.active:
-                raise HTTPException(409, "已有评测正在运行。")
             try:
                 connection = self.connections.for_run(selection.backend, selection.connection)
                 models, model_env = {}, {}
@@ -179,12 +184,21 @@ class RunManager:
             except OSError as exc:
                 write_json(directory / "run.json", {**job, "status": "failed", "ended_at": _now()})
                 raise HTTPException(500, "无法启动 AMB 进程。") from exc
-            self.active = (run_id, process)
             secrets = sorted(
                 {value for key, value in env.items() if value and key.endswith(("_KEY", "_TOKEN", "_SECRET"))},
                 key=len, reverse=True,
             )
-            Thread(target=self._monitor, args=(job, process, secrets), daemon=True).start()
+            monitor = Thread(target=self._monitor, args=(job, process, secrets), daemon=True)
+            self.active[run_id] = ActiveRun(process, monitor)
+            try:
+                monitor.start()
+            except RuntimeError as exc:
+                del self.active[run_id]
+                process.kill()
+                process.wait()
+                process.stdout.close()
+                write_json(directory / "run.json", {**job, "status": "failed", "ended_at": _now()})
+                raise HTTPException(500, "无法监控 AMB 进程。") from exc
             return {**job, "backend_config": backend_config}
 
     def _monitor(self, job: dict, process: subprocess.Popen, secrets: list[str]) -> None:
@@ -200,7 +214,7 @@ class RunManager:
         finally:
             code = process.wait()
             with self.lock:
-                if self.cancelling:
+                if self.active[job["id"]].cancelling:
                     status = "cancelled"
                 else:
                     status = {0: "completed", SCORING_INCOMPLETE_EXIT_CODE: "scoring_incomplete"}.get(code, "failed")
@@ -208,36 +222,38 @@ class RunManager:
                 try:
                     write_json(directory / "run.json", job)
                 finally:
-                    self.active = None
-                    self.cancelling = False
+                    del self.active[job["id"]]
 
     def cancel(self, run_id: str) -> None:
         with self.lock:
-            if not self.active or self.active[0] != run_id:
+            run = self.active.get(run_id)
+            if run is None:
                 raise HTTPException(409, "此评测已结束。")
-            if self.cancelling:
+            if run.cancelling:
                 return
-            process = self.active[1]
-            if process.poll() is not None:
+            if run.process.poll() is not None:
                 raise HTTPException(409, "此评测已结束。")
             path = self.root / run_id / "run.json"
             write_json(path, {**_read_json(path), "status": "cancelling"})
-            self.cancelling = True
-            process.terminate()
+            run.cancelling = True
+            run.process.terminate()
 
     def stop(self) -> None:
         with self.lock:
-            if not self.active:
-                return
-            _, process = self.active
-            self.cancelling = process.poll() is None
-            if self.cancelling:
-                process.terminate()
-        try:
-            process.wait(timeout=5)
-        except subprocess.TimeoutExpired:
-            process.kill()
-            process.wait()
+            runs = list(self.active.values())
+            for run in runs:
+                if not run.cancelling and run.process.poll() is None:
+                    run.cancelling = True
+                    run.process.terminate()
+        deadline = monotonic() + 5
+        for run in runs:
+            run.monitor.join(timeout=max(0, deadline - monotonic()))
+        for run in runs:
+            if run.process.poll() is None:
+                run.process.kill()
+        deadline = monotonic() + 5
+        for run in runs:
+            run.monitor.join(timeout=max(0, deadline - monotonic()))
 
     def directory(self, run_id: str) -> Path:
         path = self.root / run_id

@@ -17,6 +17,7 @@ class MemoryProvider(ABC):
     variant: str | None = None    # variant label (e.g. "local", "cloud", "http"); None = no variants
     link: str | None = None       # URL to provider website / docs
     logo: str | None = None       # URL to provider logo image
+    dataset_name: str | None = None  # Set by EvalRunner before initialization.
     ingestion_run_id: str | None = None
     concurrency: int = 4  # max parallel queries; override to 1 for non-thread-safe providers
     supports_incremental_ingest: bool = False

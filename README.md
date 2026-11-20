@@ -167,7 +167,7 @@ BEAM 有答案的题目如果没有召回内容，以 0 分计入平均分。数
 没有召回内容，也会按评分标准检查模型是否说明信息不足。评分服务失败时，运行标为「评分未完成」并显示失败题数。
 导出的 JSON 保留逐题结果，失败题标记为 `scoring_failed`，总分 `accuracy` 为 `null`。
 
-评测台供本机单用户使用，一次运行一个评测。每次运行都有独立的 Hindsight Bank 名称或 Mem0 用户 ID；
+评测台供单用户使用，一次运行一个评测。每次运行都有独立的 Hindsight Bank 名称或 Mem0 用户 ID；
 ContextBase 使用预授权的测试 Bank，并以运行和题目所属的隔离单元标签分开数据。停止评测会终止本地
 评测进程，之前已提交给后端的写入可能仍在处理。历史、日志和结果均保存在
 `amb-results/workbench/`（Compose）或 `outputs/workbench/`（直接运行）。
@@ -194,6 +194,25 @@ sha256sum -c amb-workbench-linux-amd64.tar.gz.sha256
 sudo docker load -i amb-workbench-linux-amd64.tar.gz
 sudo AMB_IMAGE=amb-workbench:local AMB_PULL=never bash ecs-user-data.sh
 ```
+
+#### 通过宿主机 IP 访问评测台
+
+在受信任的网络中，可以用 Docker 将评测台发布到宿主机的 `0.0.0.0:8090`。
+将示例 IP `192.0.2.10` 换成浏览器实际使用的宿主机 IP，然后打开 `http://宿主机IP:8090`。
+
+```sh
+docker run -d --name amb-workbench --init --restart unless-stopped \
+  -p 0.0.0.0:8090:8090 \
+  -e AMB_WORKBENCH_ALLOWED_HOSTS=192.0.2.10 \
+  --add-host=host.docker.internal:host-gateway \
+  -v amb-workbench-results:/app/outputs \
+  -v amb-workbench-config:/app/workbench-config \
+  amb-workbench:local
+```
+
+使用 Compose 时，在 `.env` 中设置 `AMB_WORKBENCH_BIND=0.0.0.0` 和 `AMB_WORKBENCH_ALLOWED_HOSTS=192.0.2.10`。
+ECS 启动脚本也接受这两个环境变量。允许的 Host 可以是 IP 或域名，多个值用逗号分隔，填写时省略协议和端口。
+评测台没有登录鉴权。使用宿主机 IP 直连时，建议通过 ECS 安全组或防火墙限制可访问 8090 的来源。
 
 启动后，在页面填写容器可访问的记忆服务地址，并按评测需要配置回答和评分模型。无公网时，可以使用同机或内网的 API。
 

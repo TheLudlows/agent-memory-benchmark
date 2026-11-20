@@ -27,11 +27,12 @@ services:
         required: false
     environment:
       AMB_WORKBENCH_CONFIG_DIR: /app/workbench-config
+      AMB_WORKBENCH_ALLOWED_HOSTS: ${AMB_WORKBENCH_ALLOWED_HOSTS:-}
       HINDSIGHT_HTTP_URL: ${HINDSIGHT_HTTP_URL:-http://host.docker.internal:8888}
     extra_hosts:
       - host.docker.internal:host-gateway
     ports:
-      - "127.0.0.1:8090:8090"
+      - "${AMB_WORKBENCH_BIND:-127.0.0.1}:8090:8090"
     volumes:
       - ./amb-results:/app/outputs
       - amb-workbench-config:/app/workbench-config

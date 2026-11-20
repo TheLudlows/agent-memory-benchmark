@@ -322,6 +322,7 @@ class EvalRunner:
                 except ScoringError as exc:
                     correct, judge_reason, scoring_failed = False, str(exc), True
                     q.meta["scoring_error_stage"] = "attribution"
+                    logger.warning("[query:%s] %s", q.id, exc)
                 else:
                     score = float(ranked_score[0]) if ranked_score else None
             elif not answer_result.context and not dataset.should_judge_empty_context(q.meta):

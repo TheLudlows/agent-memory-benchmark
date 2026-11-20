@@ -11,7 +11,7 @@ import httpx
 
 from ..models import Document
 from .base import MemoryProvider
-from .hindsight import _as_recall_response, _build_docs, _deduplicate_results
+from .hindsight import _as_recall_response, _bank_id_from_store_dir, _build_docs, _deduplicate_results
 
 
 class ContextBaseMemoryProvider(MemoryProvider):
@@ -34,6 +34,7 @@ class ContextBaseMemoryProvider(MemoryProvider):
         if bool(self._bank_id) == bool(self._bank_map):
             raise ValueError("Set either CONTEXTBASE_BANK_ID or CONTEXTBASE_BENCH_BANKS.")
 
+        self._precision_scoring = False
         self._configured_run_id = os.environ.get("CONTEXTBASE_BENCH_RUN_ID")
         if self._configured_run_id and not re.fullmatch(r"[A-Za-z0-9_-]{1,48}", self._configured_run_id):
             raise ValueError("CONTEXTBASE_BENCH_RUN_ID must use 1–48 letters, digits, underscores, or hyphens.")
@@ -51,6 +52,7 @@ class ContextBaseMemoryProvider(MemoryProvider):
         self._http = httpx.Client(base_url=url, headers={"Authorization": f"Bearer {token}"}, timeout=60)
 
     def prepare(self, store_dir: Path, unit_ids: set[str] | None = None, reset: bool = True) -> None:
+        self._precision_scoring = _bank_id_from_store_dir(store_dir)[1] == "precisionmembench"
         if not unit_ids:
             raise ValueError("No isolation units matched the benchmark selection.")
         missing = unit_ids - self._bank_map.keys() if self._bank_map else set()
@@ -196,9 +198,41 @@ class ContextBaseMemoryProvider(MemoryProvider):
             finally:
                 temporary.unlink(missing_ok=True)
 
+    def _precision_source_id(self, fact: dict) -> str | None:
+        prefix = f"amb-{self.ingestion_run_id}-"
+        document_id = fact.get("document_id") or ""
+        if document_id.startswith(prefix):
+            return document_id.removeprefix(prefix)
+        # Reject an explicit link to another run even if the original fixture
+        # ID in its metadata also exists in this run.
+        if document_id.startswith("amb-"):
+            return None
+        if doc_id := (fact.get("metadata") or {}).get("doc_id"):
+            return doc_id
+        marker = re.match(r"beliefId=(\S+) scope=", fact.get("context") or "")
+        return marker[1] if marker else None
+
+    def _precision_sources(self, result: dict, source_facts: dict) -> list[str]:
+        references = result.get("source_fact_ids") or []
+        if not references:
+            source = self._precision_source_id(result)
+            return [source] if source else []
+
+        sources = []
+        for fact_id in references:
+            source = self._precision_source_id(source_facts.get(fact_id) or {})
+            if not source:
+                # Scoring only part of an observation would give wrong results
+                # for assertions that forbid returning specific beliefs.
+                return []
+            sources.append(source)
+        return list(dict.fromkeys(sources))
+
     def retrieve(self, query: str, k: int = 10, user_id: str | None = None, query_timestamp: str | None = None) -> tuple[list[Document], dict]:
         path, tags = self._scope(user_id)
         include: dict = {"entities": None}
+        if self._precision_scoring:
+            include["source_facts"] = {"max_tokens": max(self._max_tokens, 4096)}
         if self._max_chunk_tokens:
             include["chunks"] = {"max_tokens": self._max_chunk_tokens}
         payload = {
@@ -214,6 +248,15 @@ class ContextBaseMemoryProvider(MemoryProvider):
             raise RuntimeError(f"ContextBase Recall returned an invalid results field for {path}")
         recall = _as_recall_response(raw)
         docs = _build_docs(_deduplicate_results(recall.results), recall.chunks)
+        if self._precision_scoring:
+            results = {}
+            for result in raw["results"]:
+                results.setdefault(result["id"], result)
+            source_facts = raw.get("source_facts") or {}
+            for doc in docs:
+                doc.source_ids = self._precision_sources(results[doc.id], source_facts)
+            return docs, raw
+
         prefix = f"amb-{self.ingestion_run_id}-"
         for doc in docs:
             if doc.source_ids:

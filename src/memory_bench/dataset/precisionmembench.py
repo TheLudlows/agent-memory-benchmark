@@ -464,11 +464,20 @@ class PrecisionMemBenchDataset(Dataset):
         seen: set[str] = set()
         how: Counter = Counter()
         for d in docs:
+            if d.source_ids == []:
+                # An adapter that verifies lineage can report that resolution is
+                # incomplete. Do not replace missing evidence with a text guess.
+                how["unresolved"] += 1
+                continue
+            source_ids = [sid for sid in (d.source_ids or []) if sid in known]
+            if source_ids:
+                how["source_id"] += 1
+                for sid in source_ids:
+                    if sid not in seen:
+                        seen.add(sid)
+                        resolved.append(sid)
+                continue
             bid = method = None
-            for sid in (getattr(d, "source_ids", None) or []):
-                if sid in known:
-                    bid, method = sid, "source_id"
-                    break
             if bid is None and d.id in known:
                 bid, method = d.id, "doc_id"
             if bid is None:

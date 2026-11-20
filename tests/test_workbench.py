@@ -139,6 +139,29 @@ def mock_services(monkeypatch, recall_gate):
                 if body["query"] in {"Precision failure", "LifeBench Recall failure"}:
                     self.send_json({"error": "Recall failed"}, status=403)
                     return
+                if body["query"].startswith("Precision observation"):
+                    assert body["include"]["source_facts"]["max_tokens"] > 0
+                    items = {
+                        item["metadata"]["doc_id"]: item
+                        for path, payload in calls if path.endswith("/memories") for item in payload["items"]
+                    }
+                    sources = {
+                        "fact-1": {"id": "fact-1", "document_id": items["b-present"]["document_id"]},
+                        "fact-2": {"id": "fact-2", "context": items["b-forbidden"]["context"]},
+                    }
+                    if body["query"].endswith("truncated"):
+                        del sources["fact-2"]
+                    if body["query"].endswith("foreign"):
+                        sources["fact-2"].update(document_id="amb-other-run-b-forbidden", metadata={"doc_id": "b-forbidden"})
+                    self.send_json({
+                        "results": [{
+                            "id": "observation", "type": "observation", "text": "Expected fact",
+                            "source_fact_ids": ["fact-1", "fact-2"],
+                        }],
+                        "source_facts": sources,
+                        "source_facts_truncated": body["query"].endswith("truncated"),
+                    })
+                    return
                 if body["query"] == "Precision unknown source":
                     matches = [{"id": "opaque-fact", "text": "An astronomical observatory is located in the desert."}]
                 elif "Precision test" in body["query"]:
@@ -1475,6 +1498,43 @@ def test_lifebench_writes_only_the_history_available_to_each_question(monkeypatc
     answer_prompt, judge_prompt, *_ = [body["messages"][0]["content"] for path, body in calls if path.endswith("/chat/completions")]
     assert "提问日期：2025-01-03" in answer_prompt
     assert "提到巴黎" in judge_prompt
+
+
+def test_contextbase_precision_workbench_scores_observation_lineage(monkeypatch, tmp_path, mock_services):
+    endpoint, _ = mock_services
+    monkeypatch.setenv("PRECISIONMEMBENCH_DATA_PATH", str(tmp_path))
+    (tmp_path / "beliefs.seed.json").write_text(json.dumps([
+        {"_id": "b-present", "user_id": "test-user", "scope": ["code"], "canonical_name": "Expected fact"},
+        {"_id": "b-forbidden", "user_id": "test-user", "scope": ["code"], "canonical_name": "Forbidden fact"},
+    ]), encoding="utf-8")
+    tests = {
+        "complete": {"shouldOnlyInclude": ["b-present", "b-forbidden"]},
+        "forbidden": {"mustInclude": ["b-present"], "mustExclude": ["b-forbidden"]},
+        "truncated": {"shouldOnlyInclude": ["b-present"]},
+        "foreign": {"shouldOnlyInclude": ["b-present"]},
+    }
+    (tmp_path / "retrieval.cases.json").write_text(json.dumps([
+        {"caseId": case, "query": f"Precision observation {case}", "category": "test",
+         "scope": ["code"], "expect": {"relevantBeliefs": expect}}
+        for case, expect in tests.items()
+    ]), encoding="utf-8")
+    with TestClient(create_app(tmp_path / "runs"), base_url="http://127.0.0.1") as client:
+        url, detail = await_result(client, client.post("/api/runs", json={
+            "dataset": "precisionmembench", "split": "single-turn", "backend": "contextbase", "name": "Sources",
+            "connection": {"api_url": endpoint, "api_key": "test-bearer-value", "bank_id": "ui-bank"},
+        }))
+        assert detail["status"] == "scoring_incomplete", detail["log"]
+        assert detail["summary"]["score"] is None
+        assert detail["summary"]["scoring_failed_queries"] == 2
+        rows = {row["query_id"]: row for row in client.get(url + "/result").json()["results"]}
+        assert rows["complete"]["correct"]
+        assert rows["complete"]["meta"]["relevant_beliefs"] == ["b-present", "b-forbidden"]
+        assert not rows["forbidden"]["scoring_failed"]
+        assert rows["forbidden"]["judge_reason"] == "forbidden belief surfaced: b-forbidden"
+        for case in ("truncated", "foreign"):
+            assert rows[case]["meta"]["scoring_error_stage"] == "attribution"
+            assert rows[case]["meta"]["resolution"] == {"unresolved": 1}
+            assert "Cannot resolve the source IDs" in rows[case]["judge_reason"]
 
 
 def test_precision_workbench_keeps_retrieval_and_attribution_errors_out_of_scores(monkeypatch, tmp_path, mock_services):

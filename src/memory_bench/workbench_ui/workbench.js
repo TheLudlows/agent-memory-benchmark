@@ -25,7 +25,8 @@ let selected;
 let jobs = [];
 let historyOffset = 0;
 let hasNextPage = false;
-let activeJob = false;
+let runCapacity;
+let refreshVersion = 0;
 let submitting = false;
 let questionCountVersion = 0;
 let contextTokenRunId;
@@ -303,8 +304,14 @@ function updateForm() {
     $(id).disabled = submitting;
   }
   $("connection-url").disabled = submitting || Boolean(saved);
-  $("start").disabled = submitting || savingModels.size > 0 || activeJob || !ready || Boolean(splitError || modelError);
-  $("start").textContent = submitting ? "正在启动…" : activeJob ? "已有评测运行中" : "开始评测";
+  const capacityFull = runCapacity && runCapacity.active >= runCapacity.limit;
+  const capacityHint = $("run-capacity");
+  capacityHint.hidden = !capacityFull;
+  const capacityMessage = capacityFull
+    ? `已有 ${runCapacity.active} / ${runCapacity.limit} 轮评测在运行或停止中。等一轮结束后可启动新评测。` : "";
+  if (capacityMessage !== capacityHint.textContent) capacityHint.textContent = capacityMessage;
+  $("start").disabled = submitting || savingModels.size > 0 || !runCapacity || capacityFull || !ready || Boolean(splitError || modelError);
+  $("start").textContent = submitting ? "正在启动…" : capacityFull ? "并行名额已满" : "开始评测";
 }
 
 function runType(job) {
@@ -705,13 +712,14 @@ async function loadDetail(id) {
 }
 
 async function refresh() {
+  const version = ++refreshVersion;
   const offset = historyOffset;
-  const [page, newest] = await Promise.all([
+  const [page, capacity] = await Promise.all([
     api(`/runs?limit=${pageSize + 1}&offset=${offset}`),
-    offset ? api("/runs?limit=1") : Promise.resolve(null),
+    api("/runs/capacity"),
   ]);
-  if (offset !== historyOffset) return;
-  activeJob = isActive((newest || page)[0]);
+  if (version !== refreshVersion) return;
+  runCapacity = capacity;
   hasNextPage = page.length > pageSize;
   const updated = page.slice(0, pageSize);
   if (!selected && updated.length) selected = updated[0].id;
@@ -776,12 +784,13 @@ $("run-form").addEventListener("submit", async (event) => {
 });
 
 $("cancel").addEventListener("click", async () => {
+  const runId = selected;
   $("cancel").disabled = true;
   try {
-    await api(`/runs/${selected}/cancel`, { method: "POST" });
+    await api(`/runs/${runId}/cancel`, { method: "POST" });
     await refresh();
   } catch (error) {
-    setError("run-error", error.message);
+    if (runId === selected) setError("run-error", error.message);
   }
 });
 

@@ -4,6 +4,7 @@ import json
 import os
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -33,7 +34,14 @@ def private_workbench_config(monkeypatch, tmp_path):
 
 
 @pytest.fixture
-def mock_services(monkeypatch):
+def recall_gate():
+    gate = threading.Event()
+    gate.set()
+    return gate
+
+
+@pytest.fixture
+def mock_services(monkeypatch, recall_gate):
     for name in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy"):
         monkeypatch.delenv(name, raising=False)
     monkeypatch.setenv("MEM0_TELEMETRY", "false")
@@ -126,6 +134,7 @@ def mock_services(monkeypatch):
                     return
                 self.send_json({"success": True, "async": True, "items_count": len(body["items"]), "operation_id": "test-op"})
             elif self.path.endswith("/memories/recall"):
+                recall_gate.wait(timeout=40)
                 empty_queries = {"No memory?", "What did they say about pets?", "What is their salary?"}
                 if body["query"] == "Precision failure":
                     self.send_json({"error": "Recall failed"}, status=403)
@@ -188,6 +197,19 @@ def test_workbench_rejects_wildcard_hosts(monkeypatch, tmp_path):
     monkeypatch.setenv("AMB_WORKBENCH_ALLOWED_HOSTS", "*")
     with pytest.raises(ValueError, match="AMB_WORKBENCH_ALLOWED_HOSTS"):
         create_app(tmp_path / "runs")
+
+
+@pytest.mark.parametrize("setting", ["", "0", "-1", "2.5"])
+def test_workbench_run_limit_rejects_invalid_values(monkeypatch, tmp_path, setting):
+    monkeypatch.setenv("AMB_WORKBENCH_MAX_CONCURRENT_RUNS", setting)
+    with pytest.raises(ValueError, match="AMB_WORKBENCH_MAX_CONCURRENT_RUNS"):
+        create_app(tmp_path / "runs")
+
+
+def test_workbench_run_limit_reads_environment(monkeypatch, tmp_path):
+    monkeypatch.setenv("AMB_WORKBENCH_MAX_CONCURRENT_RUNS", "1")
+    with TestClient(create_app(tmp_path / "runs"), base_url="http://127.0.0.1") as client:
+        assert client.get("/api/runs/capacity").json() == {"active": 0, "limit": 1}
 
 
 def test_standard_question_counts_without_loading_datasets(monkeypatch, tmp_path):
@@ -317,7 +339,6 @@ Path.replace = replace
             assert response.status_code == 201, response.text
             assert response.json()["backend_config"]["has_key"]
             assert "test-bearer-value" not in response.text
-            assert client.post("/api/runs", json=selection).status_code == 409
             detail_url, detail = await_result(client, response)
             assert detail["status"] == "completed", detail["log"]
             assert "Saved →" in detail["log"]
@@ -863,8 +884,9 @@ def test_workbench_refuses_config_directory_inside_results(monkeypatch, tmp_path
         create_app(results)
 
 
-def test_workbench_runs_use_saved_global_models(monkeypatch, tmp_path, mock_services, private_workbench_config):
+def test_workbench_runs_use_saved_global_models(monkeypatch, tmp_path, mock_services, private_workbench_config, recall_gate):
     endpoint, calls = mock_services
+    monkeypatch.delenv("AMB_WORKBENCH_MAX_CONCURRENT_RUNS", raising=False)
     for name in ("OPENAI_API_KEY", "GEMINI_API_KEY", "GOOGLE_API_KEY", "GROQ_API_KEY"):
         monkeypatch.delenv(name, raising=False)
     for name in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy"):
@@ -907,6 +929,7 @@ def test_workbench_runs_use_saved_global_models(monkeypatch, tmp_path, mock_serv
             text = client.get(path).text
             for key in (answer[2], judge[2]):
                 assert key not in text
+        assert client.get(url + "/result").json()["run_name"] == f"web-{detail['id']}"
         return url
 
     with TestClient(create_app(directory), base_url="http://127.0.0.1") as client:
@@ -927,11 +950,57 @@ def test_workbench_runs_use_saved_global_models(monkeypatch, tmp_path, mock_serv
         assert invalid.status_code == 422 and "override-answer-key" not in invalid.text
         assert client.get("/api/runs").json() == []
 
-        run = client.post("/api/runs", json=selection)
-        assert run.status_code == 201, run.text
-        assert client.post("/api/models/judge", json=config("judge-updated", "judge")).status_code == 200
+        recall_gate.clear()
+        try:
+            with ThreadPoolExecutor(max_workers=3) as pool:
+                responses = list(pool.map(
+                    lambda index: client.post("/api/runs", json={**selection, "name": f"Concurrent run {index}"}),
+                    range(3),
+                ))
+            assert sorted(response.status_code for response in responses) == [201, 201, 409]
+            run, second = [response for response in responses if response.status_code == 201]
+            rejected, = [response for response in responses if response.status_code == 409]
+            assert "同时运行 2 轮" in rejected.json()["detail"]
+            assert client.get("/api/runs/capacity").json() == {"active": 2, "limit": 2}
+            assert len(client.get("/api/runs").json()) == 2
+            assert run.json()["models"] == second.json()["models"]
+            assert client.post("/api/models/judge", json=config("judge-updated", "judge")).status_code == 200
+
+            deadline = time.monotonic() + 30
+            while sum(path.endswith("/memories/recall") for path, _ in calls) < 2 and time.monotonic() < deadline:
+                time.sleep(0.05)
+            assert sum(path.endswith("/memories/recall") for path, _ in calls) == 2
+            stopped = f"/api/runs/{second.json()['id']}"
+            assert client.post(stopped + "/cancel").status_code == 202
+            deadline = time.monotonic() + 10
+            while client.get(stopped).json()["status"] != "cancelled" and time.monotonic() < deadline:
+                time.sleep(0.05)
+            assert client.get(stopped).json()["status"] == "cancelled"
+            assert client.get("/api/runs/capacity").json() == {"active": 1, "limit": 2}
+
+            third = client.post("/api/runs", json={**selection, "name": "Concurrent run with updated model"})
+            assert third.status_code == 201, third.text
+            assert client.get("/api/runs/capacity").json() == {"active": 2, "limit": 2}
+
+            deadline = time.monotonic() + 30
+            while sum(path.endswith("/memories/recall") for path, _ in calls) < 3 and time.monotonic() < deadline:
+                time.sleep(0.05)
+            recalls = [body for path, body in calls if path.endswith("/memories/recall")]
+            assert len(recalls) == 3
+            assert len({body["tags"][0] for body in recalls}) == 3
+            assert all(body["tags_match"] == "all_strict" for body in recalls)
+            retained = [item for path, body in calls if path.endswith("/memories") for item in body["items"]]
+            assert len({item["document_id"] for item in retained}) == 3
+            assert {tuple(item["tags"]) for item in retained} == {tuple(body["tags"]) for body in recalls}
+            for running in (run, third):
+                assert client.get(f"/api/runs/{running.json()['id']}").json()["status"] == "running"
+        finally:
+            recall_gate.set()
         first_url = assert_run_models(client, run, ("answer-default", "environment", "environment-model-key"),
                                       ("judge-default", "judge", "saved-judge-key"))
+        assert_run_models(client, third, ("answer-default", "environment", "environment-model-key"),
+                          ("judge-updated", "judge", "saved-judge-key"))
+        assert client.get("/api/runs/capacity").json() == {"active": 0, "limit": 2}
 
     with TestClient(create_app(directory), base_url="http://127.0.0.1") as client:
         models = client.get("/api/config").json()["models"]
@@ -948,6 +1017,19 @@ def test_workbench_runs_use_saved_global_models(monkeypatch, tmp_path, mock_serv
         assert "saved-judge-key" not in storage.read_text(encoding="utf-8")
         assert "environment-model-key" not in storage.read_text(encoding="utf-8")
         assert not list(directory.rglob("models.json"))
+
+    recall_gate.clear()
+    try:
+        with TestClient(create_app(directory), base_url="http://127.0.0.1") as client:
+            # Restore a usable judge and leave two concurrent runs for shutdown.
+            assert client.post("/api/models/judge", json=config("judge-default", "judge", "saved-judge-key")).status_code == 200
+            responses = [client.post("/api/runs", json=selection) for _ in range(2)]
+            assert all(response.status_code == 201 for response in responses)
+        for response in responses:
+            run = directory / response.json()["id"] / "run.json"
+            assert json.loads(run.read_text(encoding="utf-8"))["status"] == "cancelled"
+    finally:
+        recall_gate.set()
 
 
 def test_workbench_keeps_beam_judge_default(monkeypatch, tmp_path):

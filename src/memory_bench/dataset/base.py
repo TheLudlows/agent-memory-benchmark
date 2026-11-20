@@ -40,7 +40,7 @@ class Dataset(ABC):
     task_type: Literal["open", "mcq", "coding", "retrieval"] = "open"
     isolation_unit: str | None = None
     ingest_all_before_queries: bool = False  # Seed every unit before evaluating any query.
-    query_timestamp_cutoff: bool = False  # Only ingest documents visible at each query timestamp.
+    incremental_history: bool = False  # Ingest only the history visible to each query.
     links: list[dict] = []
     published: bool = False
     score_type: str = "accuracy"
@@ -65,6 +65,12 @@ class Dataset(ABC):
         Default: doc.user_id. Override when the isolation key comes from elsewhere
         (e.g. doc.id, or a field in doc.messages)."""
         return doc.user_id
+
+    def document_history_position(self, document: Document) -> int | str:
+        return document.timestamp or ""
+
+    def query_history_position(self, query: Query) -> int | str:
+        return query.meta["query_timestamp"]
 
     def categories(self, split: str) -> list[str] | None:
         """Return the list of category names for a split, or None if not applicable."""

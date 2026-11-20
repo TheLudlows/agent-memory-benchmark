@@ -34,6 +34,8 @@ from .dataset.lifebench import SPLITS as LIFEBENCH_SPLITS, TOTAL_QUERIES as LIFE
 from .dataset.lifebench_v2 import SPLITS as LIFEBENCH_V2_SPLITS, TOTAL_QUERIES as LIFEBENCH_V2_QUERIES
 from .dataset.locomo import SPLITS as LOCOMO_SPLITS
 from .dataset.longmemeval import SPLITS as LONGMEMEVAL_SPLITS
+from .dataset.personamem import SPLITS as PERSONAMEM_SPLITS
+from .dataset.personamem_offline import TOTAL_QUERIES as PERSONAMEM_QUERIES
 from .dataset.precisionmembench import SPLITS as PRECISIONMEMBENCH_SPLITS, TOTAL_QUERIES as PRECISIONMEMBENCH_QUERIES
 from .json_files import write_json
 from .workbench_connections import BackendId, Connections, RunConnection
@@ -45,15 +47,18 @@ DATASETS = {
     "longmemeval": LONGMEMEVAL_SPLITS,
     "lifebench": LIFEBENCH_SPLITS,
     "lifebench-v2": LIFEBENCH_V2_SPLITS,
+    "personamem": PERSONAMEM_SPLITS,
     "precisionmembench": PRECISIONMEMBENCH_SPLITS,
 }
 RETRIEVAL_DATASETS = {"precisionmembench"}
+CHOICE_DATASETS = {"personamem"}
 QUESTION_TYPE_FIELDS = {
     "locomo": ("Question Type", "category"),
     "beam": ("Question Category", "question_category"),
     "longmemeval": ("Question Type", "question_type"),
     "lifebench": ("Question Type", "category"),
     "lifebench-v2": ("题型", "question_types"),
+    "personamem": ("Question Type", "question_type"),
     "precisionmembench": ("Category", "category"),
 }
 # Counts from data/<dataset>/<split>/stats.json.gz. Previews of the standard
@@ -64,6 +69,7 @@ STANDARD_QUERY_COUNTS = {
     "longmemeval": {"s": 500},
     "lifebench": {"en": LIFEBENCH_QUERIES},
     "lifebench-v2": {"zh": LIFEBENCH_V2_QUERIES},
+    "personamem": PERSONAMEM_QUERIES,
     "precisionmembench": {"single-turn": PRECISIONMEMBENCH_QUERIES},
 }
 RUN_ID = re.compile(r"[0-9a-f]{32}")
@@ -74,7 +80,7 @@ ASSETS = Path(__file__).with_name("workbench_ui")
 
 class RunSelection(BaseModel):
     model_config = ConfigDict(extra="forbid")
-    dataset: Literal["locomo", "beam", "longmemeval", "lifebench", "lifebench-v2", "precisionmembench"]
+    dataset: Literal["locomo", "beam", "longmemeval", "lifebench", "lifebench-v2", "precisionmembench", "personamem"]
     split: str
     backend: BackendId
     query_limit: int | None = Field(default=5, ge=1, strict=True)
@@ -170,7 +176,7 @@ class RunManager:
                 connection = self.connections.for_run(selection.backend, selection.connection)
                 models, model_env = {}, {}
                 if selection.mode == "rag":
-                    models, model_env = self.models.for_run(selection.dataset)
+                    models, model_env = self.models.for_run(selection.dataset, needs_judge=selection.dataset not in CHOICE_DATASETS)
             except ValueError as exc:
                 raise HTTPException(422, str(exc)) from exc
             try:
@@ -416,6 +422,7 @@ def create_app(output_dir: Path) -> FastAPI:
         return {
             "datasets": DATASETS,
             "retrieval_datasets": sorted(RETRIEVAL_DATASETS),
+            "choice_datasets": sorted(CHOICE_DATASETS),
             "split_errors": {"beam": {
                 split: error for split in BEAM_SPLITS if (error := _dataset_error("beam", split))
             }},
@@ -429,6 +436,8 @@ def create_app(output_dir: Path) -> FastAPI:
     def dataset_query_count(dataset: str, split: str):
         if split not in DATASETS.get(dataset, ()):
             raise HTTPException(404, "评测数据集或 split 不可用。")
+        if dataset == "personamem":
+            return {"query_count": STANDARD_QUERY_COUNTS[dataset][split]}
         try:
             if dataset == "beam":
                 local_path = beam_local_data_path(split, require_split=True)

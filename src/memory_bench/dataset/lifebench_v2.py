@@ -56,7 +56,7 @@ class LifeBenchV2Dataset(Dataset):
     description = "LifeBench 2.0 Chinese multi-source memory: 10 users, 3,380 questions."
     splits = SPLITS
     isolation_unit = "user"
-    query_timestamp_cutoff = True
+    incremental_history = True
     links = [{"label": "Dataset", "url": "https://huggingface.co/datasets/C1754955896/Lifebenchv2.0"}]
 
     def _read(self, user: str, file: str) -> list | dict:

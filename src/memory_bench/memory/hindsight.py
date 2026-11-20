@@ -7,8 +7,8 @@ from uuid import uuid4
 from ..models import Document
 from .base import MemoryProvider, RetrievalError
 
-# These benchmarks can award credit for a successful, genuinely empty recall.
-_STRICT_RECALL_DATASETS = {"precisionmembench", "lifebench"}
+# These benchmarks distinguish a failed request from a successful empty recall.
+_STRICT_RECALL_DATASETS = {"precisionmembench", "lifebench", "personamem"}
 
 
 def _recall_error_status(error: Exception) -> int | None:

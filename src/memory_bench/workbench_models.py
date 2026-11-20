@@ -170,11 +170,13 @@ class ModelSettings:
             key = self._check_key(role, config)
         return config.metadata(), {_worker_key(role): key}
 
-    def for_run(self, dataset: str) -> tuple[dict, dict[str, str]]:
+    def for_run(self, dataset: str, *, needs_judge: bool = True) -> tuple[dict, dict[str, str]]:
         metadata = {}
         env = {}
         with self.lock:
             for role in ROLES:
+                if role == "judge" and not needs_judge:
+                    continue
                 config = self._get(role)
                 env[_worker_key(role)] = self._check_key(role, config)
                 fallback = (

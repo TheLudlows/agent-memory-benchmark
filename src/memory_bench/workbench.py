@@ -130,6 +130,13 @@ class ActiveRun:
 
 class RunManager:
     def __init__(self, root: Path):
+        limit = os.getenv("AMB_WORKBENCH_MAX_CONCURRENT_RUNS", "2")
+        try:
+            self.max_concurrent_runs = int(limit)
+        except ValueError as exc:
+            raise ValueError("AMB_WORKBENCH_MAX_CONCURRENT_RUNS 必须是正整数。") from exc
+        if self.max_concurrent_runs < 1:
+            raise ValueError("AMB_WORKBENCH_MAX_CONCURRENT_RUNS 必须是正整数。")
         self.root = root.resolve()
         self.root.mkdir(parents=True, exist_ok=True)
         self.connections = Connections(
@@ -143,10 +150,18 @@ class RunManager:
             if job.get("status") in {"running", "cancelling"}:
                 write_json(path, {**job, "status": "interrupted", "ended_at": _now()})
 
+    def capacity(self) -> dict:
+        with self.lock:
+            return {"active": len(self.active), "limit": self.max_concurrent_runs}
+
     def start(self, selection: RunRequest) -> dict:
         if error := _dataset_error(selection.dataset, selection.split):
             raise HTTPException(422, error)
         with self.lock:
+            if len(self.active) >= self.max_concurrent_runs:
+                raise HTTPException(
+                    409, f"已达到同时运行 {self.max_concurrent_runs} 轮评测的上限。请等待一轮结束后再启动。",
+                )
             try:
                 connection = self.connections.for_run(selection.backend, selection.connection)
                 models, model_env = {}, {}
@@ -480,6 +495,10 @@ def create_app(output_dir: Path) -> FastAPI:
     @app.post("/api/runs", status_code=201)
     def start(selection: RunRequest):
         return manager.start(selection)
+
+    @app.get("/api/runs/capacity")
+    def run_capacity():
+        return manager.capacity()
 
     @app.get("/api/runs/{run_id}")
     def detail(run_id: str):

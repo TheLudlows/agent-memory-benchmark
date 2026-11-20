@@ -4,6 +4,7 @@ import json
 import os
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -196,6 +197,19 @@ def test_workbench_rejects_wildcard_hosts(monkeypatch, tmp_path):
     monkeypatch.setenv("AMB_WORKBENCH_ALLOWED_HOSTS", "*")
     with pytest.raises(ValueError, match="AMB_WORKBENCH_ALLOWED_HOSTS"):
         create_app(tmp_path / "runs")
+
+
+@pytest.mark.parametrize("setting", ["", "0", "-1", "2.5"])
+def test_workbench_run_limit_rejects_invalid_values(monkeypatch, tmp_path, setting):
+    monkeypatch.setenv("AMB_WORKBENCH_MAX_CONCURRENT_RUNS", setting)
+    with pytest.raises(ValueError, match="AMB_WORKBENCH_MAX_CONCURRENT_RUNS"):
+        create_app(tmp_path / "runs")
+
+
+def test_workbench_run_limit_reads_environment(monkeypatch, tmp_path):
+    monkeypatch.setenv("AMB_WORKBENCH_MAX_CONCURRENT_RUNS", "1")
+    with TestClient(create_app(tmp_path / "runs"), base_url="http://127.0.0.1") as client:
+        assert client.get("/api/runs/capacity").json() == {"active": 0, "limit": 1}
 
 
 def test_standard_question_counts_without_loading_datasets(monkeypatch, tmp_path):
@@ -872,6 +886,7 @@ def test_workbench_refuses_config_directory_inside_results(monkeypatch, tmp_path
 
 def test_workbench_runs_use_saved_global_models(monkeypatch, tmp_path, mock_services, private_workbench_config, recall_gate):
     endpoint, calls = mock_services
+    monkeypatch.delenv("AMB_WORKBENCH_MAX_CONCURRENT_RUNS", raising=False)
     for name in ("OPENAI_API_KEY", "GEMINI_API_KEY", "GOOGLE_API_KEY", "GROQ_API_KEY"):
         monkeypatch.delenv(name, raising=False)
     for name in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy"):
@@ -937,14 +952,35 @@ def test_workbench_runs_use_saved_global_models(monkeypatch, tmp_path, mock_serv
 
         recall_gate.clear()
         try:
-            run = client.post("/api/runs", json=selection)
-            assert run.status_code == 201, run.text
-            second = client.post("/api/runs", json={**selection, "name": "Concurrent run to stop"})
-            assert second.status_code == 201, second.text
+            with ThreadPoolExecutor(max_workers=3) as pool:
+                responses = list(pool.map(
+                    lambda index: client.post("/api/runs", json={**selection, "name": f"Concurrent run {index}"}),
+                    range(3),
+                ))
+            assert sorted(response.status_code for response in responses) == [201, 201, 409]
+            run, second = [response for response in responses if response.status_code == 201]
+            rejected, = [response for response in responses if response.status_code == 409]
+            assert "同时运行 2 轮" in rejected.json()["detail"]
+            assert client.get("/api/runs/capacity").json() == {"active": 2, "limit": 2}
+            assert len(client.get("/api/runs").json()) == 2
             assert run.json()["models"] == second.json()["models"]
             assert client.post("/api/models/judge", json=config("judge-updated", "judge")).status_code == 200
+
+            deadline = time.monotonic() + 30
+            while sum(path.endswith("/memories/recall") for path, _ in calls) < 2 and time.monotonic() < deadline:
+                time.sleep(0.05)
+            assert sum(path.endswith("/memories/recall") for path, _ in calls) == 2
+            stopped = f"/api/runs/{second.json()['id']}"
+            assert client.post(stopped + "/cancel").status_code == 202
+            deadline = time.monotonic() + 10
+            while client.get(stopped).json()["status"] != "cancelled" and time.monotonic() < deadline:
+                time.sleep(0.05)
+            assert client.get(stopped).json()["status"] == "cancelled"
+            assert client.get("/api/runs/capacity").json() == {"active": 1, "limit": 2}
+
             third = client.post("/api/runs", json={**selection, "name": "Concurrent run with updated model"})
             assert third.status_code == 201, third.text
+            assert client.get("/api/runs/capacity").json() == {"active": 2, "limit": 2}
 
             deadline = time.monotonic() + 30
             while sum(path.endswith("/memories/recall") for path, _ in calls) < 3 and time.monotonic() < deadline:
@@ -956,14 +992,6 @@ def test_workbench_runs_use_saved_global_models(monkeypatch, tmp_path, mock_serv
             retained = [item for path, body in calls if path.endswith("/memories") for item in body["items"]]
             assert len({item["document_id"] for item in retained}) == 3
             assert {tuple(item["tags"]) for item in retained} == {tuple(body["tags"]) for body in recalls}
-            assert {job["status"] for job in client.get("/api/runs").json()} == {"running"}
-
-            stopped = f"/api/runs/{second.json()['id']}"
-            assert client.post(stopped + "/cancel").status_code == 202
-            deadline = time.monotonic() + 10
-            while client.get(stopped).json()["status"] != "cancelled" and time.monotonic() < deadline:
-                time.sleep(0.05)
-            assert client.get(stopped).json()["status"] == "cancelled"
             for running in (run, third):
                 assert client.get(f"/api/runs/{running.json()['id']}").json()["status"] == "running"
         finally:
@@ -972,6 +1000,7 @@ def test_workbench_runs_use_saved_global_models(monkeypatch, tmp_path, mock_serv
                                       ("judge-default", "judge", "saved-judge-key"))
         assert_run_models(client, third, ("answer-default", "environment", "environment-model-key"),
                           ("judge-updated", "judge", "saved-judge-key"))
+        assert client.get("/api/runs/capacity").json() == {"active": 0, "limit": 2}
 
     with TestClient(create_app(directory), base_url="http://127.0.0.1") as client:
         models = client.get("/api/config").json()["models"]

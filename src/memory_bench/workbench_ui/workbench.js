@@ -25,6 +25,8 @@ let selected;
 let jobs = [];
 let historyOffset = 0;
 let hasNextPage = false;
+let runCapacity;
+let refreshVersion = 0;
 let submitting = false;
 let questionCountVersion = 0;
 let contextTokenRunId;
@@ -302,8 +304,14 @@ function updateForm() {
     $(id).disabled = submitting;
   }
   $("connection-url").disabled = submitting || Boolean(saved);
-  $("start").disabled = submitting || savingModels.size > 0 || !ready || Boolean(splitError || modelError);
-  $("start").textContent = submitting ? "正在启动…" : "开始评测";
+  const capacityFull = runCapacity && runCapacity.active >= runCapacity.limit;
+  const capacityHint = $("run-capacity");
+  capacityHint.hidden = !capacityFull;
+  const capacityMessage = capacityFull
+    ? `已有 ${runCapacity.active} / ${runCapacity.limit} 轮评测在运行或停止中。等一轮结束后可启动新评测。` : "";
+  if (capacityMessage !== capacityHint.textContent) capacityHint.textContent = capacityMessage;
+  $("start").disabled = submitting || savingModels.size > 0 || !runCapacity || capacityFull || !ready || Boolean(splitError || modelError);
+  $("start").textContent = submitting ? "正在启动…" : capacityFull ? "并行名额已满" : "开始评测";
 }
 
 function runType(job) {
@@ -704,9 +712,14 @@ async function loadDetail(id) {
 }
 
 async function refresh() {
+  const version = ++refreshVersion;
   const offset = historyOffset;
-  const page = await api(`/runs?limit=${pageSize + 1}&offset=${offset}`);
-  if (offset !== historyOffset) return;
+  const [page, capacity] = await Promise.all([
+    api(`/runs?limit=${pageSize + 1}&offset=${offset}`),
+    api("/runs/capacity"),
+  ]);
+  if (version !== refreshVersion) return;
+  runCapacity = capacity;
   hasNextPage = page.length > pageSize;
   const updated = page.slice(0, pageSize);
   if (!selected && updated.length) selected = updated[0].id;

@@ -41,7 +41,12 @@ def recall_gate():
 
 
 @pytest.fixture
-def mock_services(monkeypatch, recall_gate):
+def recall_responses():
+    return {}
+
+
+@pytest.fixture
+def mock_services(monkeypatch, recall_gate, recall_responses):
     for name in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy"):
         monkeypatch.delenv(name, raising=False)
     monkeypatch.setenv("MEM0_TELEMETRY", "false")
@@ -135,6 +140,10 @@ def mock_services(monkeypatch, recall_gate):
                 self.send_json({"success": True, "async": True, "items_count": len(body["items"]), "operation_id": "test-op"})
             elif self.path.endswith("/memories/recall"):
                 recall_gate.wait(timeout=40)
+                if body["query"] in recall_responses:
+                    data, status = recall_responses[body["query"]]
+                    self.send_json(data, status=status)
+                    return
                 empty_queries = {"No memory?", "What did they say about pets?", "What is their salary?"}
                 if body["query"] in {"Precision failure", "LifeBench Recall failure"}:
                     self.send_json({"error": "Recall failed"}, status=403)
@@ -1397,6 +1406,37 @@ def test_personamem_workbench_scores_choices_with_the_visible_prefix(monkeypatch
             recalled.add((user, payload["query"]))
     assert recalled == set(expected_history)
     assert sum(path.endswith("/chat/completions") for path, _ in calls) == len(queries)
+
+
+def test_personamem_hindsight_distinguishes_empty_recall_from_failure(
+    monkeypatch, tmp_path, mock_services, recall_responses,
+):
+    from memory_bench.dataset.personamem_offline import OfflinePersonaMemDataset
+
+    endpoint, calls = mock_services
+    monkeypatch.setenv("OPENAI_BASE_URL", endpoint + "/v1")
+    monkeypatch.setenv("OPENAI_API_KEY", "test-model-key")
+    monkeypatch.setenv("OMB_ANSWER_LLM", "openai")
+    empty_query, failed_query = OfflinePersonaMemDataset("32k").load_queries("32k", limit=2)
+    recall_responses[empty_query.meta["retrieval_query"]] = ({"results": []}, 200)
+    recall_responses[failed_query.meta["retrieval_query"]] = ({"error": "Recall failed"}, 403)
+
+    with TestClient(create_app(tmp_path / "runs"), base_url="http://127.0.0.1") as client:
+        url, detail = await_result(client, client.post("/api/runs", json={
+            "name": "PersonaMem Recall outcomes", "dataset": "personamem", "split": "32k",
+            "backend": "hindsight-http", "query_limit": 2,
+            "connection": {"api_url": endpoint, "api_key": "test-bearer-value"},
+        }))
+        assert detail["status"] == "scoring_incomplete", detail["log"]
+        assert detail["summary"]["score"] is None
+        assert detail["summary"]["scoring_failed_queries"] == 1
+        rows = {row["query_id"]: row for row in client.get(url + "/result").json()["results"]}
+        empty = rows[empty_query.id]
+        failed = rows[failed_query.id]
+        assert empty["context"] == "" and not empty["correct"] and not empty["scoring_failed"]
+        assert failed["scoring_failed"] and failed["meta"]["scoring_error_stage"] == "retrieval"
+        assert "403" in failed["judge_reason"]
+    assert sum(path.endswith("/chat/completions") for path, _ in calls) == 1
 
 
 @pytest.mark.parametrize("backend", ["contextbase", "hindsight-http", "mem0-cloud"])

@@ -7,8 +7,13 @@ from uuid import uuid4
 from ..models import Document
 from .base import MemoryProvider, RetrievalError
 
-# These benchmarks can award credit for a successful, genuinely empty recall.
-_STRICT_RECALL_DATASETS = {"precisionmembench", "lifebench"}
+# These benchmarks distinguish a failed request from a successful empty recall.
+_STRICT_RECALL_DATASETS = {"precisionmembench", "lifebench", "personamem"}
+
+
+def _recall_error_status(error: Exception) -> int | None:
+    return getattr(getattr(error, "response", None), "status_code", None) or getattr(error, "status", None)
+
 
 # Workaround: hindsight-client passes async_= but the model expects var_async=
 # This monkey-patch fixes RetainRequest so async_=True actually works.
@@ -879,6 +884,11 @@ class _HindsightBase(MemoryProvider):
         key = getattr(self, "_cloud_api_key", None)
         return base.rstrip("/"), ({"Authorization": f"Bearer {key}"} if key else {})
 
+    def _parse_recall_http_response(self, payload: dict):
+        if self._dataset in _STRICT_RECALL_DATASETS and not isinstance(payload.get("results"), list):
+            raise ValueError("Hindsight Recall response is missing a result list")
+        return _as_recall_response(payload)
+
     def _recall_http(self, kwargs: dict):
         import httpx
 
@@ -889,7 +899,7 @@ class _HindsightBase(MemoryProvider):
             headers=headers, json=body, timeout=120,
         )
         r.raise_for_status()
-        return _as_recall_response(r.json())
+        return self._parse_recall_http_response(r.json())
 
     async def _arecall_http(self, kwargs: dict):
         import httpx
@@ -902,10 +912,7 @@ class _HindsightBase(MemoryProvider):
                 headers=headers, json=body,
             )
             r.raise_for_status()
-            payload = r.json()
-            if self._dataset in _STRICT_RECALL_DATASETS and not isinstance(payload.get("results"), list):
-                raise ValueError("Hindsight Recall response is missing a result list")
-            return _as_recall_response(payload)
+            return self._parse_recall_http_response(r.json())
 
     # ── Sync retrieve ─────────────────────────────────────────────────────────
 
@@ -922,6 +929,9 @@ class _HindsightBase(MemoryProvider):
                     _log.warning(f"recall failed (attempt {attempt+1}/3, retrying in 10s): {e}")
                     time.sleep(10)
                 else:
+                    if self._dataset in _STRICT_RECALL_DATASETS:
+                        status = _recall_error_status(e) or type(e).__name__
+                        raise RetrievalError(f"Hindsight Recall failed ({status})") from e
                     _log.warning(f"recall failed after 3 attempts (returning empty): {e}")
                     return [], None
         chunks = response.chunks or {}
@@ -1051,6 +1061,9 @@ class HindsightMemoryProvider(_HindsightBase):
                     _log.warning(f"async_recall failed (attempt {attempt+1}/3, retrying in 10s): {e}")
                     await asyncio.sleep(10)
                 else:
+                    if self._dataset in _STRICT_RECALL_DATASETS:
+                        status = _recall_error_status(e) or type(e).__name__
+                        raise RetrievalError(f"Hindsight Recall failed ({status})") from e
                     _log.warning(f"async_recall failed after 3 attempts (returning empty): {e}")
                     return [], None
         chunks = response.chunks or {}
@@ -1237,7 +1250,7 @@ class HindsightCloudMemoryProvider(_HindsightBase):
                 return [], None
             except Exception as e:
                 if self._dataset in _STRICT_RECALL_DATASETS:
-                    status = getattr(getattr(e, "response", None), "status_code", None) or getattr(e, "status", None)
+                    status = _recall_error_status(e)
                     if attempt == 4 or status in {400, 401, 403, 404, 422}:
                         raise RetrievalError(f"Hindsight Recall failed ({status or type(e).__name__})") from e
                 if attempt == 4:

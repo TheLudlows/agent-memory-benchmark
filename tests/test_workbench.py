@@ -22,7 +22,7 @@ from memory_bench.memory.mem0_cloud import Mem0CloudMemoryProvider
 from memory_bench.models import AnswerResult, Document, QueryResult
 from memory_bench.modes.rag import RAGMode
 from memory_bench.runner import EvaluationProgress, EvalRunner
-from memory_bench.workbench import create_app
+from memory_bench.workbench import RunManager, create_app
 
 
 @pytest.fixture(autouse=True)
@@ -354,6 +354,8 @@ Path.replace = replace
         }))
         assert detail["status"] == "scoring_incomplete", detail["log"]
         assert detail["summary"]["scoring_failed_queries"] == 3
+        assert "[评分 · 题目 " in detail["log"] and "HTTP 401，鉴权失败" in detail["log"]
+        assert "HTTP Request:" not in detail["log"] and "score=None" not in detail["log"]
         assert detail["summary"]["score"] is None
         assert detail["summary"]["question_fingerprint"] == saved_fingerprints["beam"]
         assert detail["summary"]["document_fingerprint"] != document_fingerprints["beam"]
@@ -640,6 +642,52 @@ def test_workbench_remembers_connections_by_backend_and_url(monkeypatch, tmp_pat
         storage, = private_workbench_config.glob("*/connections.json")
         assert json.loads(storage.read_text(encoding="utf-8"))["contextbase"][0]["api_key"] == "rotated-secret"
         assert not (directory / ".connections.json").exists()
+
+
+def test_failed_run_explains_stage_query_and_upstream_status(monkeypatch, tmp_path, mock_services):
+    endpoint, _ = mock_services
+    for key, value in {
+        "OPENAI_API_KEY": "test-model-key",
+        "OPENAI_BASE_URL": endpoint + "/v1",
+        "OMB_ANSWER_LLM": "openai", "OMB_JUDGE_LLM": "openai",
+        "OMB_ANSWER_MODEL": "answer-stub", "OMB_JUDGE_MODEL": "judge-fail",
+    }.items():
+        monkeypatch.setenv(key, value)
+    dataset = tmp_path / "locomo.json"
+    dataset.write_text(json.dumps([{
+        "sample_id": "conv-log",
+        "conversation": {"speaker_a": "A", "speaker_b": "B", "session_1": [
+            {"speaker": "A", "dia_id": "D1:1", "text": "Paris"},
+        ]},
+        "qa": [{"question": "Where?", "answer": "Paris", "category": 1, "evidence": ["D1:1"]}],
+    }]), encoding="utf-8")
+    monkeypatch.setenv("LOCOMO_DATA_PATH", str(dataset))
+    monkeypatch.setenv("PYTHONPATH", str(Path(__file__).resolve().parents[1] / "src"))
+    with TestClient(create_app(tmp_path / "runs"), base_url="http://127.0.0.1") as client:
+        response = client.post("/api/runs", json={
+            "name": "Failed score log", "dataset": "locomo", "split": "locomo10", "backend": "contextbase",
+            "connection": {"api_url": endpoint, "api_key": "test-bearer-value", "bank_id": "ui-bank"},
+        })
+        _, detail = await_result(client, response)
+        assert detail["status"] == "failed"
+        log = detail["log"]
+        assert log.rstrip().splitlines()[-1].startswith("[评测失败] 评分 · 题目 conv-log_q0：HTTP 401")
+        assert "调用位置" in log and "HTTP Request:" not in log and "test judge unavailable" not in log
+
+
+def test_short_log_secret_preserves_addresses_and_identifiers(tmp_path):
+    manager = RunManager(tmp_path / "runs")
+    job = {"id": "a" * 32}
+    directory = manager.root / job["id"]
+    directory.mkdir()
+    line = "2026-11-19 18:15:40,994 [题目 conv-47_q12] http://127.0.0.1/v1 HTTP 401"
+    process = SimpleNamespace(
+        stdout=io.StringIO(f"{line}\nAuthorization: Bearer 1\nAPI key: example-secret-1\n"), wait=lambda: 1,
+    )
+    manager._monitor(job, process, ["example-secret-1", "1"])
+    assert (directory / "run.log").read_text(encoding="utf-8").splitlines() == [
+        line, "Authorization: Bearer [redacted]", "API key: [redacted]",
+    ]
 
 
 def test_mem0_client_uses_configured_host(monkeypatch):

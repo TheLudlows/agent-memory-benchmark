@@ -6,6 +6,7 @@ from ..llm.base import LLM, Schema
 from ..llm.gemini import GeminiLLM
 from ..memory.base import MemoryProvider
 from ..models import AnswerResult
+from ..run_diagnostics import evaluation_step
 
 from ..dataset.base import _DEFAULT_OPEN_PROMPT, _DEFAULT_MCQ_PROMPT
 
@@ -46,7 +47,8 @@ class RAGMode(ResponseMode):
         meta = meta or {}
         query_timestamp = meta.get("query_timestamp")
         retrieval_query = meta.get("retrieval_query") or query
-        docs, raw_response = await memory.async_retrieve(retrieval_query, user_id=user_id, query_timestamp=query_timestamp)
+        with evaluation_step("检索记忆"):
+            docs, raw_response = await memory.async_retrieve(retrieval_query, user_id=user_id, query_timestamp=query_timestamp)
         retrieve_ms = (time.perf_counter() - t0) * 1000
 
         context = "\n\n".join(
@@ -54,9 +56,10 @@ class RAGMode(ResponseMode):
         )
 
         prompt_fn = meta.get("_prompt_fn")
-        if task_type == "mcq":
-            return await asyncio.to_thread(self._answer_mcq, query, context, retrieve_ms, raw_response, prompt_fn, meta)
-        return await asyncio.to_thread(self._answer_open, query, context, retrieve_ms, raw_response, prompt_fn, meta)
+        with evaluation_step("生成回答"):
+            if task_type == "mcq":
+                return await asyncio.to_thread(self._answer_mcq, query, context, retrieve_ms, raw_response, prompt_fn, meta)
+            return await asyncio.to_thread(self._answer_open, query, context, retrieve_ms, raw_response, prompt_fn, meta)
 
     def answer_from_context(self, query: str, context: str, task_type: str = "open", meta: dict | None = None) -> AnswerResult:
         prompt_fn = (meta or {}).get("_prompt_fn")

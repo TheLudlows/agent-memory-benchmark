@@ -31,6 +31,18 @@ let questionCountVersion = 0;
 let contextTokenRunId;
 let contextTokenOffset = 0;
 let contextTokenRequest = 0;
+let questionTypesRunId;
+let questionTypesRequest = 0;
+
+const questionTypeLabels = new Map(Object.entries({
+  "single-hop": "单跳", "multi-hop": "多跳", temporal: "时间推理", "open-domain": "开放域",
+  abstention: "拒答", contradiction_resolution: "矛盾处理", event_ordering: "事件排序",
+  information_extraction: "信息提取", instruction_following: "指令遵循", knowledge_update: "知识更新",
+  multi_session_reasoning: "跨会话推理", preference_following: "偏好遵循", summarization: "摘要",
+  temporal_reasoning: "时间推理", "single-session-user": "单会话（用户）",
+  "single-session-assistant": "单会话（助手）", "single-session-preference": "单会话（偏好）",
+  "multi-session": "跨会话", "knowledge-update": "知识更新", "temporal-reasoning": "时间推理",
+}));
 
 const modelRoles = { answer: "回答模型", judge: "评分模型" };
 const providerLabels = { gemini: "Gemini", openai: "OpenAI 兼容", groq: "Groq" };
@@ -502,6 +514,62 @@ function renderRunProgress(job) {
     ? `已用时 ${minutes ? `${minutes} 分 ` : ""}${elapsed % 60} 秒` : "";
 }
 
+async function renderQuestionTypes(job) {
+  const finished = job.status === "completed" || job.status === "scoring_incomplete";
+  const runId = finished && job.result_available ? job.id : null;
+  $("question-types").hidden = !runId;
+  if (runId === questionTypesRunId) return;
+  questionTypesRunId = runId;
+  const request = ++questionTypesRequest;
+  const table = $("question-type-data");
+  const status = $("question-types-status");
+  const note = $("question-types-note");
+  table.hidden = note.hidden = true;
+  if (!runId) return;
+
+  const dataset = job.selection.dataset;
+  const beam = dataset === "beam";
+  const retrieval = retrievalOnly(dataset);
+  $("question-types-title").textContent = retrieval ? "按类别统计" : "按题型统计";
+  $("question-types-label").textContent = retrieval ? "类别" : "题型";
+  $("question-types-total").textContent = retrieval ? "用例数" : "题数";
+  $("question-types-correct").textContent = retrieval ? "通过" : beam ? "达标" : "答对";
+  $("question-types-incorrect").textContent = retrieval ? "未通过" : beam ? "未达标" : "答错";
+  const metric = retrieval ? "通过率" : beam ? "平均得分" : "准确率";
+  $("question-types-score").textContent = metric;
+  status.textContent = "正在读取题型统计…";
+  status.hidden = false;
+  try {
+    const rows = job.summary.question_types ?? (await api(`/runs/${runId}/question-types`)).rows;
+    if (request !== questionTypesRequest) return;
+    $("question-types-rows").replaceChildren(...rows.map((row) => {
+      const tr = document.createElement("tr");
+      const name = document.createElement("th");
+      name.scope = "row";
+      name.textContent = questionTypeLabels.get(row.label) ?? (row.label || "未分类");
+      tr.append(name);
+      for (const value of [row.total, row.correct, row.total - row.correct - row.scoring_failed,
+        row.scoring_failed, scoreText(row.score)]) {
+        const cell = document.createElement("td");
+        cell.textContent = value;
+        tr.append(cell);
+      }
+      return tr;
+    }));
+    table.hidden = !rows.length;
+    status.hidden = Boolean(rows.length);
+    status.textContent = "暂无题型统计。";
+    const notes = [];
+    if (rows.some((row) => row.scoring_failed)) notes.push(`${metric}只计入评分成功的${retrieval ? "用例" : "题目"}。`);
+    if (dataset === "lifebench-v2" && rows.length) notes.push("一道题可计入多个题型。");
+    note.textContent = notes.join("");
+    note.hidden = !notes.length;
+  } catch (error) {
+    if (request !== questionTypesRequest) return;
+    status.textContent = error.message;
+  }
+}
+
 function renderContextTokens(job) {
   const average = job.summary.avg_context_tokens;
   $("context-token-metric").hidden = average == null;
@@ -621,6 +689,7 @@ async function loadDetail(id) {
   }
   $("distribution").hidden = !s.total_queries;
   $("distribution-note").hidden = job.selection.dataset !== "beam";
+  renderQuestionTypes(job);
   renderContextTokens(job);
   $("download").hidden = !job.result_available;
   $("download").href = `/api/runs/${id}/result`;

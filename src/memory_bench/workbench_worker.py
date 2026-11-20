@@ -22,7 +22,7 @@ from .models import Document
 from .modes import get_mode
 from .modes.rag import RAGMode
 from .runner import EvaluationProgress, EvalRunner
-from .workbench import SCORING_INCOMPLETE_EXIT_CODE, RunSelection, _read_json
+from .workbench import SCORING_INCOMPLETE_EXIT_CODE, RunSelection, _read_json, summarize_question_types
 from .workbench_models import ModelProbeExit, Role, worker_model
 
 logger = logging.getLogger(__name__)
@@ -110,6 +110,7 @@ def run(directory: Path) -> int:
         "avg_retrieve_time_ms": mean(times) if times else None,
         "p95_retrieve_time_ms": times[ceil(0.95 * len(times)) - 1] if times else None,
         "avg_context_tokens": round(mean(context_tokens), 1) if context_tokens else None,
+        "question_types": summarize_question_types(spec.dataset, map(vars, summary.results)),
         "question_fingerprint": question_digest.hexdigest(),
         "document_fingerprint": document_digest.hexdigest(),
         "answer_llm": summary.answer_llm,

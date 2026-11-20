@@ -357,6 +357,10 @@ Path.replace = replace
                 assert rows[0]["context"] == rows[1]["context"] == ""
                 assert rows[0]["answer"] == "I don't have enough information to answer this question."
                 assert rows[1]["answer"] == "$120,000"
+                assert detail["summary"]["question_types"] == [
+                    {"label": label, "total": 2, "correct": 1, "scoring_failed": 0, "score": 0.5}
+                    for label in ("abstention", "information_extraction")
+                ]
             else:
                 assert rows[0]["answer"] == "Paris"
 
@@ -388,6 +392,10 @@ Path.replace = replace
         rows = result["results"]
         assert [(r["score"], r["scoring_failed"]) for r in rows] == [(None, True)] * 3 + [(0.0, False)]
         assert rows[2]["answer"] == "Paris"
+        assert detail["summary"]["question_types"] == [
+            {"label": "abstention", "total": 2, "correct": 0, "scoring_failed": 2, "score": None},
+            {"label": "information_extraction", "total": 2, "correct": 0, "scoring_failed": 1, "score": 0.0},
+        ]
 
         response = client.post("/api/runs", json={
             "name": "Cancel test", "connection": connection,
@@ -504,6 +512,49 @@ def test_context_token_metrics_are_available_for_legacy_results(tmp_path):
             assert body["rows"] == [{
                 "query_id": f"q{offset}", "query": ("Empty recall", "Question")[offset], "context_tokens": count,
             }]
+
+
+@pytest.mark.parametrize(("dataset", "split", "answers", "expected"), [
+    ("locomo", "locomo10", [
+        {"meta": {"category": "single-hop"}, "correct": True},
+        {"category_axes": {"Question Type": ["single-hop"], "Conversation": ["conv-1"]}, "correct": False},
+        {"meta": {"category": "single-hop"}, "correct": False, "scoring_failed": True},
+        {"meta": {"category": "temporal"}, "correct": True},
+    ], [
+        {"label": "single-hop", "total": 3, "correct": 1, "scoring_failed": 1, "score": 0.5},
+        {"label": "temporal", "total": 1, "correct": 1, "scoring_failed": 0, "score": 1.0},
+    ]),
+    ("beam", "100k", [
+        {"meta": {"question_category": "abstention"}, "correct": True, "score": 0.75},
+        {"meta": {"question_category": "abstention"}, "correct": False, "score": 0.25},
+        {"meta": {"question_category": "abstention"}, "correct": False, "judge_reason": "empty context"},
+    ], [
+        {"label": "abstention", "total": 3, "correct": 1, "scoring_failed": 0, "score": 1 / 3},
+    ]),
+    ("lifebench-v2", "zh", [
+        {"meta": {"question_types": ["甲", "乙", "乙"]}, "correct": True},
+        {"meta": {"question_types": ["乙"]}, "correct": False},
+    ], [
+        {"label": "乙", "total": 2, "correct": 1, "scoring_failed": 0, "score": 0.5},
+        {"label": "甲", "total": 1, "correct": 1, "scoring_failed": 0, "score": 1.0},
+    ]),
+])
+def test_question_types_are_available_for_legacy_results(tmp_path, dataset, split, answers, expected):
+    run_id = "0" * 32
+    results = tmp_path / "runs"
+    directory = results / run_id
+    path = directory / "results" / dataset / f"web-{run_id}" / "rag" / f"{split}.json"
+    path.parent.mkdir(parents=True)
+    write_json(directory / "run.json", {
+        "id": run_id, "status": "completed",
+        "selection": {"dataset": dataset, "split": split, "backend": "contextbase"},
+    })
+    write_json(path, {"results": answers})
+
+    with TestClient(create_app(results), base_url="http://localhost") as client:
+        response = client.get(f"/api/runs/{run_id}/question-types")
+        assert response.status_code == 200, response.text
+        assert response.json() == {"rows": expected}
 
 
 @pytest.mark.parametrize("replace_on", ["http.response.start", "http.response.body"])

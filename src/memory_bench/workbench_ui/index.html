@@ -119,6 +119,24 @@
               <div id="distribution-bars"></div>
               <p id="distribution-note" class="hint" hidden>BEAM 单题得分 ≥ 0.5 计为答对。</p>
             </figure>
+            <figure id="question-types" class="chart" hidden>
+              <figcaption id="question-types-title">按题型统计</figcaption>
+              <p id="question-types-status" class="hint" role="status" hidden></p>
+              <div class="question-type-scroll" id="question-type-data" hidden>
+                <table class="question-type-table" aria-labelledby="question-types-title">
+                  <thead><tr>
+                    <th scope="col" id="question-types-label">题型</th>
+                    <th scope="col" id="question-types-total">题数</th>
+                    <th scope="col" id="question-types-correct">答对</th>
+                    <th scope="col" id="question-types-incorrect">答错</th>
+                    <th scope="col">评分失败</th>
+                    <th scope="col" id="question-types-score">准确率</th>
+                  </tr></thead>
+                  <tbody id="question-types-rows"></tbody>
+                </table>
+              </div>
+              <p id="question-types-note" class="hint" hidden></p>
+            </figure>
             <details id="context-tokens" hidden>
               <summary>逐题召回上下文 Token</summary>
               <p id="context-tokens-status" class="hint" role="status"></p>

@@ -122,6 +122,11 @@ ul { list-style: none; padding: 0; margin: 12px 0 0; }
 .context-tokens-table th, .context-tokens-table td { text-align: left; padding: 7px 6px; border-bottom: 1px solid var(--border); overflow-wrap: anywhere; }
 .context-tokens-table th:last-child, .context-tokens-table td:last-child { text-align: right; white-space: nowrap; font-variant-numeric: tabular-nums; }
 .context-tokens-table small { display: block; margin-top: 2px; color: var(--muted); }
+.question-type-scroll { overflow-x: auto; }
+.question-type-table { width: 100%; border-collapse: collapse; font-size: .85rem; }
+.question-type-table :is(th, td) { padding: 7px 6px; border-bottom: 1px solid var(--border); }
+.question-type-table th:first-child { text-align: left; overflow-wrap: anywhere; }
+.question-type-table :is(th, td):not(:first-child) { text-align: right; white-space: nowrap; font-variant-numeric: tabular-nums; }
 .chart { margin: 14px 0 0; padding: 12px; border: 1px solid var(--border); border-radius: 6px; }
 .chart figcaption { font-weight: 650; margin-bottom: 10px; }
 .chart-row { display: grid; grid-template-columns: minmax(90px, 1fr) minmax(65px, 2fr) minmax(62px, auto); gap: 9px; align-items: center; margin-block: 6px; font-size: .84rem; }

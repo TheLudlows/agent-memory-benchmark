@@ -5,6 +5,7 @@ import os
 import re
 import subprocess
 import sys
+from collections.abc import Iterable
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from functools import lru_cache
@@ -44,6 +45,13 @@ DATASETS = {
     "precisionmembench": PRECISIONMEMBENCH_SPLITS,
 }
 RETRIEVAL_DATASETS = {"precisionmembench"}
+QUESTION_TYPE_FIELDS = {
+    "locomo": ("Question Type", "category"),
+    "beam": ("Question Category", "question_category"),
+    "longmemeval": ("Question Type", "question_type"),
+    "lifebench-v2": ("题型", "question_types"),
+    "precisionmembench": ("Category", "category"),
+}
 # Counts from data/<dataset>/<split>/stats.json.gz. Previews of the standard
 # splits should be available before the evaluation downloads their corpora.
 STANDARD_QUERY_COUNTS = {
@@ -260,6 +268,48 @@ def _context_token_report(path: Path) -> tuple[float | None, list[dict]]:
     return average, rows
 
 
+def summarize_question_types(dataset: str, rows: Iterable[dict]) -> list[dict]:
+    axis, meta_key = QUESTION_TYPE_FIELDS[dataset]
+    by_type: dict[str, dict] = {}
+    for row in rows:
+        labels = (row.get("category_axes") or {}).get(axis) or (row.get("meta") or {}).get(meta_key)
+        if isinstance(labels, str):
+            labels = [labels]
+        correct = row.get("correct") is True
+        score = float(correct)
+        failed = bool(row.get("scoring_failed"))
+        if dataset == "beam" and not failed:
+            raw_score = row.get("score")
+            if raw_score is not None:
+                score = float(raw_score)
+            elif (row.get("judge_reason") or "").startswith("empty context"):
+                # Older BEAM runs left the score unset for a confirmed empty recall.
+                score = 0.0
+            else:
+                failed = True
+        for label in set(labels or [""]):
+            stats = by_type.setdefault(label, {"total": 0, "correct": 0, "scoring_failed": 0, "score_sum": 0.0})
+            stats["total"] += 1
+            if failed:
+                stats["scoring_failed"] += 1
+            else:
+                stats["correct"] += int(correct)
+                stats["score_sum"] += score
+
+    result = []
+    for label, stats in sorted(by_type.items(), key=lambda item: (not item[0], item[0])):
+        scored = stats["total"] - stats["scoring_failed"]
+        score_sum = stats.pop("score_sum")
+        result.append({"label": label, **stats, "score": score_sum / scored if scored else None})
+    return result
+
+
+@lru_cache(maxsize=16)
+def _legacy_question_type_report(path: Path, dataset: str) -> list[dict]:
+    with path.open("rb") as source:
+        return summarize_question_types(dataset, ijson.items(source, "results.item"))
+
+
 def _run_summary(directory: Path, job: dict) -> dict:
     summary = _read_json(directory / "summary.json")
     if summary and "avg_context_tokens" not in summary and job["status"] in {"completed", "scoring_incomplete"}:
@@ -433,6 +483,20 @@ def create_app(output_dir: Path) -> FastAPI:
             raise HTTPException(404, "当前还没有完整的逐题上下文指标。")
         average, rows = _context_token_report(_result_path(directory, job))
         return {"average": average, "total": len(rows), "rows": rows[offset:offset + limit]}
+
+    @app.get("/api/runs/{run_id}/question-types")
+    def question_types(run_id: str):
+        directory = manager.directory(run_id)
+        job = _read_json(directory / "run.json")
+        if job["status"] not in {"completed", "scoring_incomplete"}:
+            raise HTTPException(404, "评测完成后可查看题型统计。")
+        rows = _read_json(directory / "summary.json").get("question_types")
+        if rows is None:
+            try:
+                rows = _legacy_question_type_report(_result_path(directory, job), job["selection"]["dataset"])
+            except FileNotFoundError:
+                raise HTTPException(404, "当前还没有评测结果。") from None
+        return {"rows": rows}
 
     @app.post("/api/runs/{run_id}/cancel", status_code=202)
     def cancel(run_id: str):

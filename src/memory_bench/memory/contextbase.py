@@ -11,7 +11,7 @@ import httpx
 
 from ..models import Document
 from .base import MemoryProvider
-from .hindsight import _as_recall_response, _bank_id_from_store_dir, _build_docs, _deduplicate_results
+from .hindsight import _as_recall_response, _build_docs, _deduplicate_results
 
 
 class ContextBaseMemoryProvider(MemoryProvider):
@@ -34,7 +34,7 @@ class ContextBaseMemoryProvider(MemoryProvider):
         if bool(self._bank_id) == bool(self._bank_map):
             raise ValueError("Set either CONTEXTBASE_BANK_ID or CONTEXTBASE_BENCH_BANKS.")
 
-        self._precision_scoring = False
+        self._precision_documents: dict[str, dict[str, str]] = {}
         self._configured_run_id = os.environ.get("CONTEXTBASE_BENCH_RUN_ID")
         if self._configured_run_id and not re.fullmatch(r"[A-Za-z0-9_-]{1,48}", self._configured_run_id):
             raise ValueError("CONTEXTBASE_BENCH_RUN_ID must use 1–48 letters, digits, underscores, or hyphens.")
@@ -52,7 +52,7 @@ class ContextBaseMemoryProvider(MemoryProvider):
         self._http = httpx.Client(base_url=url, headers={"Authorization": f"Bearer {token}"}, timeout=60)
 
     def prepare(self, store_dir: Path, unit_ids: set[str] | None = None, reset: bool = True) -> None:
-        self._precision_scoring = _bank_id_from_store_dir(store_dir)[1] == "precisionmembench"
+        self._precision_documents.clear()
         if not unit_ids:
             raise ValueError("No isolation units matched the benchmark selection.")
         missing = unit_ids - self._bank_map.keys() if self._bank_map else set()
@@ -112,8 +112,9 @@ class ContextBaseMemoryProvider(MemoryProvider):
         return sha256(payload.encode("utf-8")).hexdigest()
 
     def validate_ingestion(self, documents: list[Document]) -> None:
+        items_by_unit = self._items_by_unit(documents)
         expected_by_bank: dict[str, set[str]] = {}
-        for unit_id, items in self._items_by_unit(documents).items():
+        for unit_id, items in items_by_unit.items():
             checkpoint = self._checkpoint(unit_id)
             path, _ = self._scope(unit_id)
             if not checkpoint.is_file():
@@ -140,6 +141,7 @@ class ContextBaseMemoryProvider(MemoryProvider):
                     break
             if missing:
                 raise ValueError(f"ContextBase run {self.ingestion_run_id} is missing {len(missing)} document(s) in {path}.")
+        self._record_precision_documents(items_by_unit)
 
     def ingest(self, documents: list[Document]) -> None:
         items_by_unit = self._items_by_unit(documents)
@@ -197,33 +199,45 @@ class ContextBaseMemoryProvider(MemoryProvider):
                 temporary.replace(checkpoint)
             finally:
                 temporary.unlink(missing_ok=True)
+        self._record_precision_documents(items_by_unit)
 
-    def _precision_source_id(self, fact: dict) -> str | None:
-        prefix = f"amb-{self.ingestion_run_id}-"
-        document_id = fact.get("document_id") or ""
-        if document_id.startswith(prefix):
-            return document_id.removeprefix(prefix)
-        # Reject an explicit link to another run even if the original fixture
-        # ID in its metadata also exists in this run.
-        if document_id.startswith("amb-"):
+    def _record_precision_documents(self, items_by_unit: dict[str, list[dict]]) -> None:
+        if self.dataset_name == "precisionmembench":
+            for unit_id, items in items_by_unit.items():
+                self._precision_documents.setdefault(unit_id, {}).update(
+                    (item["document_id"], item["metadata"]["doc_id"]) for item in items
+                )
+
+    def _precision_source_id(self, fact: dict, documents: dict[str, str], scope: list[str]) -> str | None:
+        fact_tags = set(fact.get("tags") or [])
+        source_scope = {tag for tag in fact_tags if tag.startswith(("amb-run:", "amb-unit:"))}
+        if source_scope.difference(scope):
             return None
-        if doc_id := (fact.get("metadata") or {}).get("doc_id"):
-            return doc_id
-        marker = re.match(r"beliefId=(\S+) scope=", fact.get("context") or "")
-        return marker[1] if marker else None
 
-    def _precision_sources(self, result: dict, source_facts: dict) -> list[str]:
+        document_id = fact.get("document_id") or ""
+        if document_id in documents:
+            return documents[document_id]
+        if document_id.startswith("amb-") or scope[0] not in fact_tags:
+            return None
+
+        # Metadata and context carry fixture IDs that repeat across runs.
+        # Accept them only for a fact tagged with this run.
+        source_id = (fact.get("metadata") or {}).get("doc_id")
+        if not source_id:
+            marker = re.match(r"beliefId=(\S+) scope=", fact.get("context") or "")
+            source_id = marker[1] if marker else None
+        return source_id if source_id in documents.values() else None
+
+    def _precision_sources(
+        self, result: dict, source_facts: dict, documents: dict[str, str], scope: list[str],
+    ) -> list[str]:
         references = result.get("source_fact_ids") or []
-        if not references:
-            source = self._precision_source_id(result)
-            return [source] if source else []
-
+        facts = (source_facts.get(fact_id) or {} for fact_id in references) if references else [result]
         sources = []
-        for fact_id in references:
-            source = self._precision_source_id(source_facts.get(fact_id) or {})
+        for fact in facts:
+            source = self._precision_source_id(fact, documents, scope)
             if not source:
-                # Scoring only part of an observation would give wrong results
-                # for assertions that forbid returning specific beliefs.
+                # A partial observation cannot be scored against mustExclude.
                 return []
             sources.append(source)
         return list(dict.fromkeys(sources))
@@ -231,7 +245,7 @@ class ContextBaseMemoryProvider(MemoryProvider):
     def retrieve(self, query: str, k: int = 10, user_id: str | None = None, query_timestamp: str | None = None) -> tuple[list[Document], dict]:
         path, tags = self._scope(user_id)
         include: dict = {"entities": None}
-        if self._precision_scoring:
+        if self.dataset_name == "precisionmembench":
             include["source_facts"] = {"max_tokens": max(self._max_tokens, 4096)}
         if self._max_chunk_tokens:
             include["chunks"] = {"max_tokens": self._max_chunk_tokens}
@@ -248,13 +262,14 @@ class ContextBaseMemoryProvider(MemoryProvider):
             raise RuntimeError(f"ContextBase Recall returned an invalid results field for {path}")
         recall = _as_recall_response(raw)
         docs = _build_docs(_deduplicate_results(recall.results), recall.chunks)
-        if self._precision_scoring:
+        if self.dataset_name == "precisionmembench":
             results = {}
             for result in raw["results"]:
                 results.setdefault(result["id"], result)
             source_facts = raw.get("source_facts") or {}
+            documents = self._precision_documents.get(user_id, {})
             for doc in docs:
-                doc.source_ids = self._precision_sources(results[doc.id], source_facts)
+                doc.source_ids = self._precision_sources(results[doc.id], source_facts, documents, tags)
             return docs, raw
 
         prefix = f"amb-{self.ingestion_run_id}-"

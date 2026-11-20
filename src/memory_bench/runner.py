@@ -150,6 +150,7 @@ class EvalRunner:
                 row.update(correct=False, score=None, scoring_failed=True,
                            judge_reason="Legacy result with an unjudged abstention answer")
 
+        memory.dataset_name = dataset.name
         memory.initialize()
         store_dir = self.output_dir / dataset.name / effective_name / "_store" / split / (category or "all")
 

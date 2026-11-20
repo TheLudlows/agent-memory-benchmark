@@ -91,7 +91,8 @@ def test_failed_operation_and_http_recall_error_propagate(monkeypatch, tmp_path)
     provider.cleanup()
 
 
-def test_ingestion_reuse_checks_checkpoint_input_and_each_remote_document(monkeypatch, tmp_path):
+@pytest.mark.parametrize("dataset_name", ["locomo", "precisionmembench"])
+def test_ingestion_reuse_checks_checkpoint_input_and_each_remote_document(monkeypatch, tmp_path, dataset_name):
     retained = []
     offsets = []
 
@@ -104,6 +105,12 @@ def test_ingestion_reuse_checks_checkpoint_input_and_each_remote_document(monkey
             })
         if "/operations/" in request.url.path:
             return httpx.Response(200, json={"status": "completed"})
+        if request.url.path.endswith("/memories/recall"):
+            include = json.loads(request.content)["include"]
+            assert ("source_facts" in include) == (dataset_name == "precisionmembench")
+            return httpx.Response(200, json={
+                "results": [{"id": "fact", "text": "A fact", "document_id": retained[0]}],
+            })
         assert request.url.path.endswith("/documents")
         assert request.url.params["q"] == f"amb-{run_id}-"
         offset = int(request.url.params["offset"])
@@ -112,15 +119,19 @@ def test_ingestion_reuse_checks_checkpoint_input_and_each_remote_document(monkey
 
     docs = [Document(f"conv-26_session_{i}", f"session {i}", "conv-26") for i in (1, 2)]
     provider = _provider(monkeypatch, tmp_path, handler)
+    provider.dataset_name = dataset_name
     run_id = provider.ingestion_run_id
     provider.ingest(docs)
     provider.cleanup()
 
     monkeypatch.setenv("CONTEXTBASE_BENCH_RUN_ID", run_id)
     resumed = get_memory_provider("contextbase")
+    resumed.dataset_name = dataset_name
     resumed.prepare(tmp_path, {"conv-26"}, reset=False)
     resumed.validate_ingestion(docs)
     assert offsets == [0, 1]
+    hits, _ = resumed.retrieve("test", user_id="conv-26")
+    assert hits[0].source_ids == [docs[0].id]
     with pytest.raises(ValueError, match="documents changed"):
         resumed.validate_ingestion(docs[:1])
     retained.pop()

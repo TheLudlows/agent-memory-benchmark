@@ -166,6 +166,30 @@ def await_result(client, response):
         time.sleep(0.1)
 
 
+def test_workbench_allows_configured_remote_hosts(monkeypatch, tmp_path):
+    monkeypatch.delenv("AMB_WORKBENCH_ALLOWED_HOSTS", raising=False)
+    address = "http://192.0.2.10:8090"
+    with TestClient(create_app(tmp_path / "runs-local")) as client:
+        assert client.get(f"{address}/api/config").status_code == 400
+
+    monkeypatch.setenv("AMB_WORKBENCH_ALLOWED_HOSTS", " 192.0.2.10, AMB.EXAMPLE.TEST, ")
+    with TestClient(create_app(tmp_path / "runs-remote")) as client:
+        assert client.get(f"{address}/").status_code == 200
+        assert client.get("http://amb.example.test:8090/api/config").status_code == 200
+        assert client.get("http://localhost:8090/api/config").status_code == 200
+        assert client.get("http://192.0.2.11:8090/api/config").status_code == 400
+        assert client.post(f"{address}/api/models/answer/reset", headers={"Origin": address}).status_code == 200
+        assert client.post(
+            f"{address}/api/models/answer/reset", headers={"Origin": "http://another.example.test"},
+        ).status_code == 403
+
+
+def test_workbench_rejects_wildcard_hosts(monkeypatch, tmp_path):
+    monkeypatch.setenv("AMB_WORKBENCH_ALLOWED_HOSTS", "*")
+    with pytest.raises(ValueError, match="AMB_WORKBENCH_ALLOWED_HOSTS"):
+        create_app(tmp_path / "runs")
+
+
 def test_standard_question_counts_without_loading_datasets(monkeypatch, tmp_path):
     for variable in ("LOCOMO_DATA_PATH", "LONGMEMEVAL_DATA_PATH", "BEAM_DATA_PATH", "BEAM_DATA_SPLIT",
                      "BEAM_100K_DATA_PATH", "BEAM_500K_DATA_PATH", "BEAM_1M_DATA_PATH", "BEAM_10M_DATA_PATH",

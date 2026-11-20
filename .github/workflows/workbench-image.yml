@@ -68,13 +68,14 @@ jobs:
           PY
       - name: Start the Workbench offline
         run: |
-          docker run --detach --network none --name amb-workbench-smoke amb-workbench:local
+          docker run --detach --network none --name amb-workbench-smoke \
+            --env AMB_WORKBENCH_ALLOWED_HOSTS=amb.example.test amb-workbench:local
           trap 'docker logs amb-workbench-smoke; docker rm -f amb-workbench-smoke' EXIT
           docker exec -i amb-workbench-smoke python - <<'PY'
           import json
           import time
           from urllib.error import URLError
-          from urllib.request import urlopen
+          from urllib.request import Request, urlopen
 
           base_url = 'http://127.0.0.1:8090'
           for attempt in range(30):
@@ -94,6 +95,9 @@ jobs:
               'precisionmembench': ['single-turn'],
           }, config['datasets']
           assert set(config['backends']) == {'contextbase', 'mem0-cloud', 'hindsight-http'}
+          remote_config = Request(f'{base_url}/api/config', headers={'Host': 'amb.example.test:8090'})
+          with urlopen(remote_config, timeout=2) as response:
+              assert json.load(response)['datasets'] == config['datasets']
           with urlopen(f'{base_url}/', timeout=2) as response:
               assert b'evaluation-name' in response.read()
           for path in ('/assets/workbench.js', '/assets/workbench.css'):

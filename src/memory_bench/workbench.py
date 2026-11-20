@@ -1,4 +1,4 @@
-"""Local-only API for starting and inspecting AMB runs."""
+"""API for starting and inspecting AMB runs."""
 
 import json
 import os
@@ -285,6 +285,15 @@ def _log_tail(path: Path) -> str:
 
 
 def create_app(output_dir: Path) -> FastAPI:
+    allowed_hosts = ["127.0.0.1", "localhost"]
+    allowed_hosts.extend(
+        host.strip().lower()
+        for host in os.getenv("AMB_WORKBENCH_ALLOWED_HOSTS", "").split(",")
+        if host.strip()
+    )
+    if any("*" in host for host in allowed_hosts):
+        raise ValueError("AMB_WORKBENCH_ALLOWED_HOSTS must list explicit IP addresses or hostnames.")
+
     manager = RunManager(output_dir)
 
     @asynccontextmanager
@@ -293,7 +302,7 @@ def create_app(output_dir: Path) -> FastAPI:
         manager.stop()
 
     app = FastAPI(lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)
-    app.add_middleware(TrustedHostMiddleware, allowed_hosts=["127.0.0.1", "localhost"])
+    app.add_middleware(TrustedHostMiddleware, allowed_hosts=allowed_hosts, www_redirect=False)
     app.mount("/assets", StaticFiles(directory=ASSETS), name="assets")
 
     @app.middleware("http")

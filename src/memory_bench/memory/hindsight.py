@@ -7,6 +7,9 @@ from uuid import uuid4
 from ..models import Document
 from .base import MemoryProvider, RetrievalError
 
+# These benchmarks can award credit for a successful, genuinely empty recall.
+_STRICT_RECALL_DATASETS = {"precisionmembench", "lifebench"}
+
 # Workaround: hindsight-client passes async_= but the model expects var_async=
 # This monkey-patch fixes RetainRequest so async_=True actually works.
 try:
@@ -900,7 +903,7 @@ class _HindsightBase(MemoryProvider):
             )
             r.raise_for_status()
             payload = r.json()
-            if self._dataset == "precisionmembench" and not isinstance(payload.get("results"), list):
+            if self._dataset in _STRICT_RECALL_DATASETS and not isinstance(payload.get("results"), list):
                 raise ValueError("Hindsight Recall response is missing a result list")
             return _as_recall_response(payload)
 
@@ -1228,12 +1231,12 @@ class HindsightCloudMemoryProvider(_HindsightBase):
                     response = await asyncio.wait_for(_call2, timeout=300)
                 break
             except asyncio.TimeoutError as exc:
-                if self._dataset == "precisionmembench":
+                if self._dataset in _STRICT_RECALL_DATASETS:
                     raise RetrievalError("Hindsight Recall timed out") from exc
                 _log.warning(f"async_retrieve timed out for query={query[:60]!r}")
                 return [], None
             except Exception as e:
-                if self._dataset == "precisionmembench":
+                if self._dataset in _STRICT_RECALL_DATASETS:
                     status = getattr(getattr(e, "response", None), "status_code", None) or getattr(e, "status", None)
                     if attempt == 4 or status in {400, 401, 403, 404, 422}:
                         raise RetrievalError(f"Hindsight Recall failed ({status or type(e).__name__})") from e

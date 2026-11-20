@@ -30,6 +30,7 @@ from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from .dataset import get_dataset
 from .dataset.beam import BEAMDataset, DEFAULT_JUDGE_MODEL, SPLITS as BEAM_SPLITS, local_data_path as beam_local_data_path
+from .dataset.lifebench import SPLITS as LIFEBENCH_SPLITS, TOTAL_QUERIES as LIFEBENCH_QUERIES
 from .dataset.lifebench_v2 import SPLITS as LIFEBENCH_V2_SPLITS, TOTAL_QUERIES as LIFEBENCH_V2_QUERIES
 from .dataset.locomo import SPLITS as LOCOMO_SPLITS
 from .dataset.longmemeval import SPLITS as LONGMEMEVAL_SPLITS
@@ -42,6 +43,7 @@ DATASETS = {
     "locomo": LOCOMO_SPLITS,
     "beam": BEAM_SPLITS,
     "longmemeval": LONGMEMEVAL_SPLITS,
+    "lifebench": LIFEBENCH_SPLITS,
     "lifebench-v2": LIFEBENCH_V2_SPLITS,
     "precisionmembench": PRECISIONMEMBENCH_SPLITS,
 }
@@ -50,6 +52,7 @@ QUESTION_TYPE_FIELDS = {
     "locomo": ("Question Type", "category"),
     "beam": ("Question Category", "question_category"),
     "longmemeval": ("Question Type", "question_type"),
+    "lifebench": ("Question Type", "category"),
     "lifebench-v2": ("题型", "question_types"),
     "precisionmembench": ("Category", "category"),
 }
@@ -59,6 +62,7 @@ STANDARD_QUERY_COUNTS = {
     "locomo": {"locomo10": 1540},
     "beam": {"100k": 400, "500k": 700, "1m": 700, "10m": 200},
     "longmemeval": {"s": 500},
+    "lifebench": {"en": LIFEBENCH_QUERIES},
     "lifebench-v2": {"zh": LIFEBENCH_V2_QUERIES},
     "precisionmembench": {"single-turn": PRECISIONMEMBENCH_QUERIES},
 }
@@ -70,7 +74,7 @@ ASSETS = Path(__file__).with_name("workbench_ui")
 
 class RunSelection(BaseModel):
     model_config = ConfigDict(extra="forbid")
-    dataset: Literal["locomo", "beam", "longmemeval", "lifebench-v2", "precisionmembench"]
+    dataset: Literal["locomo", "beam", "longmemeval", "lifebench", "lifebench-v2", "precisionmembench"]
     split: str
     backend: BackendId
     query_limit: int | None = Field(default=5, ge=1, strict=True)

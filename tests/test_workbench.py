@@ -136,7 +136,7 @@ def mock_services(monkeypatch, recall_gate):
             elif self.path.endswith("/memories/recall"):
                 recall_gate.wait(timeout=40)
                 empty_queries = {"No memory?", "What did they say about pets?", "What is their salary?"}
-                if body["query"] == "Precision failure":
+                if body["query"] in {"Precision failure", "LifeBench Recall failure"}:
                     self.send_json({"error": "Recall failed"}, status=403)
                     return
                 if body["query"] == "Precision unknown source":
@@ -215,13 +215,13 @@ def test_workbench_run_limit_reads_environment(monkeypatch, tmp_path):
 def test_standard_question_counts_without_loading_datasets(monkeypatch, tmp_path):
     for variable in ("LOCOMO_DATA_PATH", "LONGMEMEVAL_DATA_PATH", "BEAM_DATA_PATH", "BEAM_DATA_SPLIT",
                      "BEAM_100K_DATA_PATH", "BEAM_500K_DATA_PATH", "BEAM_1M_DATA_PATH", "BEAM_10M_DATA_PATH",
-                     "LIFEBENCH_V2_DATA_PATH", "PRECISIONMEMBENCH_DATA_PATH"):
+                     "LIFEBENCH_DATA_PATH", "LIFEBENCH_V2_DATA_PATH", "PRECISIONMEMBENCH_DATA_PATH"):
         monkeypatch.delenv(variable, raising=False)
 
     with TestClient(create_app(tmp_path / "runs"), base_url="http://127.0.0.1") as client:
         for dataset, split, count in (
             ("locomo", "locomo10", 1540), ("longmemeval", "s", 500),
-            ("lifebench-v2", "zh", 3380), ("precisionmembench", "single-turn", 77),
+            ("lifebench", "en", 2003), ("lifebench-v2", "zh", 3380), ("precisionmembench", "single-turn", 77),
             ("beam", "100k", 400), ("beam", "500k", 700), ("beam", "1m", 700), ("beam", "10m", 200),
         ):
             response = client.get(f"/api/datasets/{dataset}/{split}/query-count")
@@ -312,7 +312,7 @@ Path.replace = replace
         assert client.get("/").status_code == 200
         assert client.get("/assets/workbench.js").status_code == 200
         config = client.get("/api/config").json()
-        assert set(config["datasets"]) == {case[0] for case in fixtures} | {"lifebench-v2", "precisionmembench"}
+        assert set(config["datasets"]) == {case[0] for case in fixtures} | {"lifebench", "lifebench-v2", "precisionmembench"}
         assert set(config["backends"]) == {"contextbase", "mem0-cloud", "hindsight-http"}
         assert config["backends"]["contextbase"]["missing"] == ["API 地址", "API Key", "Bank ID"]
 
@@ -1222,6 +1222,105 @@ def test_precision_workbench_scores_source_ids_without_models(monkeypatch, tmp_p
         assert sorted(user.rsplit("-", 2)[-2] for user in users) == ["other", "test"]
         recall, = [body for path, body in calls if path == "/v2/memories/search/"]
         assert recall["filters"]["user_id"].endswith("-test-user")
+
+
+@pytest.mark.parametrize("backend", ["contextbase", "hindsight-http", "mem0-cloud"])
+def test_lifebench_english_workbench_keeps_users_separate(monkeypatch, tmp_path, mock_services, backend):
+    endpoint, calls = mock_services
+    source = tmp_path / "our_en.json"
+    users = ["于晓薇", "于晓雯"]
+    questions = [f"Where did user {i} visit?" for i in range(len(users))]
+    source.write_text(json.dumps([
+        {
+            "sample_id": user,
+            "conversation": {
+                "session_1": [{"dia_id": "D1:1", "text": "The location is Paris."}],
+                "session_1_date_time": "2025-01-01",
+            },
+            "qa": [{"question": question, "answer": "Paris", "category": category, "evidence": ["D1:1"]}],
+        }
+        for user, question, category in zip(users, questions, ("2", "3"))
+    ], ensure_ascii=False), encoding="utf-8")
+    monkeypatch.setenv("LIFEBENCH_DATA_PATH", str(source))
+    monkeypatch.setenv("OPENAI_BASE_URL", endpoint + "/v1")
+    monkeypatch.setenv("OPENAI_API_KEY", "test-model-key")
+    monkeypatch.setenv("OMB_ANSWER_LLM", "openai")
+    monkeypatch.setenv("OMB_JUDGE_LLM", "openai")
+    connection = {"api_url": endpoint, "api_key": "test-bearer-value"}
+    if backend == "contextbase":
+        connection["bank_id"] = "ui-bank"
+
+    with TestClient(create_app(tmp_path / "runs"), base_url="http://127.0.0.1") as client:
+        config = client.get("/api/config").json()
+        assert config["datasets"]["lifebench"] == ["en"]
+        assert config["datasets"]["lifebench-v2"] == ["zh"]
+        assert client.get("/api/datasets/lifebench/en/query-count").json() == {"query_count": 2}
+        url, detail = await_result(client, client.post("/api/runs", json={
+            "name": "LifeBench English", "dataset": "lifebench", "split": "en",
+            "backend": backend, "connection": connection, "query_limit": None,
+        }))
+        assert detail["status"] == "completed", detail["log"]
+        assert detail["progress"]["completed"] == detail["progress"]["total"] == 2
+        assert detail["summary"]["ingested_docs"] == 2
+        assert client.get(url + "/question-types").json()["rows"] == [
+            {"label": label, "total": 1, "correct": 1, "scoring_failed": 0, "score": 1.0}
+            for label in ("nondeclarative", "temporal-updating")
+        ]
+        result = client.get(url + "/result").json()
+        assert result["dataset"] == "lifebench" and result["split"] == "en" and result["mode"] == "rag"
+        assert {row["query_id"]: row["meta"]["category"] for row in result["results"]} == {
+            f"{users[0]}_q0": "nondeclarative", f"{users[1]}_q0": "temporal-updating",
+        }
+        assert client.get("/api/runs").json()[0]["selection"] == detail["selection"]
+
+    # Check that each question reads the same user scope that received its source document.
+    write_scope = {}
+    read_scope = {}
+    for path, body in calls:
+        if path.endswith("/memories"):
+            for item in body["items"]:
+                user = item["metadata"]["doc_id"].removesuffix("_session_1")
+                write_scope[user] = tuple(item["tags"]) if backend == "contextbase" else path
+        elif path.endswith("/memories/recall"):
+            read_scope[body["query"]] = tuple(body["tags"]) if backend == "contextbase" else path.removesuffix("/recall")
+        elif path == "/v1/memories/":
+            user = body["metadata"]["doc_id"].removesuffix("_session_1")
+            write_scope[user] = body["user_id"]
+        elif path == "/v2/memories/search/":
+            read_scope[body["query"]] = body["filters"]["user_id"]
+    assert len(set(write_scope.values())) == len(users)
+    assert [write_scope[user] for user in users] == [read_scope[question] for question in questions]
+
+
+def test_lifebench_unanswerable_distinguishes_empty_recall_from_http_error(monkeypatch, tmp_path, mock_services):
+    endpoint, calls = mock_services
+    source = tmp_path / "our_en.json"
+    questions = ["What did they say about pets?", "LifeBench Recall failure"]
+    source.write_text(json.dumps([{
+        "sample_id": "于晓薇",
+        "conversation": {"session_1": [{"dia_id": "D1:1", "text": "The location is Paris."}]},
+        "qa": [{"question": q, "answer": "Not mentioned.", "category": "4"} for q in questions],
+    }]), encoding="utf-8")
+    monkeypatch.setenv("LIFEBENCH_DATA_PATH", str(source))
+    monkeypatch.setenv("OPENAI_BASE_URL", endpoint + "/v1")
+    monkeypatch.setenv("OPENAI_API_KEY", "test-model-key")
+    monkeypatch.setenv("OMB_ANSWER_LLM", "openai")
+    monkeypatch.setenv("OMB_JUDGE_LLM", "openai")
+
+    with TestClient(create_app(tmp_path / "runs"), base_url="http://127.0.0.1") as client:
+        url, detail = await_result(client, client.post("/api/runs", json={
+            "name": "Unanswerable", "dataset": "lifebench", "split": "en", "backend": "hindsight-http",
+            "connection": {"api_url": endpoint, "api_key": "test-bearer-value"}, "query_limit": None,
+        }))
+        assert detail["status"] == "scoring_incomplete", detail["log"]
+        assert detail["summary"]["score"] is None and detail["summary"]["scoring_failed_queries"] == 1
+        empty, failed = client.get(url + "/result").json()["results"]
+        assert empty["context"] == "" and empty["correct"] and not empty["scoring_failed"]
+        assert failed["scoring_failed"] and not failed["correct"]
+        assert failed["meta"]["scoring_error_stage"] == "retrieval"
+        assert "403" in failed["judge_reason"]
+        prompts = [body["messages"][0]["content"] for path, body in calls if path.endswith("/chat/completions")]
+        assert len(prompts) == 2 and all(questions[0] in prompt for prompt in prompts)
 
 
 @pytest.mark.parametrize("backend", ["contextbase", "hindsight-http", "mem0-cloud"])

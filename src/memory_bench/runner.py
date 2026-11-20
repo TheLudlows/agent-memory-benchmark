@@ -150,6 +150,7 @@ class EvalRunner:
                 row.update(correct=False, score=None, scoring_failed=True,
                            judge_reason="Legacy result with an unjudged abstention answer")
 
+        memory.dataset_name = dataset.name
         memory.initialize()
         store_dir = self.output_dir / dataset.name / effective_name / "_store" / split / (category or "all")
 
@@ -322,6 +323,7 @@ class EvalRunner:
                 except ScoringError as exc:
                     correct, judge_reason, scoring_failed = False, str(exc), True
                     q.meta["scoring_error_stage"] = "attribution"
+                    logger.warning("[query:%s] %s", q.id, exc)
                 else:
                     score = float(ranked_score[0]) if ranked_score else None
             elif not answer_result.context and not dataset.should_judge_empty_context(q.meta):

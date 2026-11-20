@@ -1,7 +1,8 @@
 const $ = (id) => document.getElementById(id);
 const names = {
   locomo: "LoCoMo", beam: "BEAM", longmemeval: "LongMemEval",
-  "lifebench-v2": "LifeBench 2.0 中文版", precisionmembench: "PrecisionMemBench",
+  lifebench: "LifeBench 1.0 英文版", "lifebench-v2": "LifeBench 2.0 中文版",
+  precisionmembench: "PrecisionMemBench",
 };
 const statuses = { running: "运行中", cancelling: "停止中", completed: "已完成", scoring_incomplete: "评分未完成", failed: "失败", cancelled: "已停止", interrupted: "已中断" };
 const retrievalOnly = (dataset) => settings?.retrieval_datasets?.includes(dataset);
@@ -42,6 +43,8 @@ const questionTypeLabels = new Map(Object.entries({
   multi_session_reasoning: "跨会话推理", preference_following: "偏好遵循", summarization: "摘要",
   temporal_reasoning: "时间推理", "single-session-user": "单会话（用户）",
   "single-session-assistant": "单会话（助手）", "single-session-preference": "单会话（偏好）",
+  "information-extraction": "信息提取", "temporal-updating": "时间推理与知识更新",
+  nondeclarative: "非陈述性记忆", unanswerable: "不可回答",
   "multi-session": "跨会话", "knowledge-update": "知识更新", "temporal-reasoning": "时间推理",
 }));
 
@@ -294,6 +297,7 @@ function updateForm() {
   const modelError = !retrieval && missing.length
     ? `请在「全局模型设置」配置${missing.map((role) => modelRoles[role]).join("和")}。` : "";
   $("dataset-coverage").textContent = retrieval ? "纯检索评分，写入完整测试数据。"
+    : dataset === "lifebench" ? "按用户写入完整会话历史，再回答所选题目。"
     : dataset === "lifebench-v2" ? "按提问日期写入记录，之后的资料在该题作答时不可见。"
     : "限制题数时，仍会写入所选题目对应的会话历史。";
   const ready = $("evaluation-name").value.trim() && connection.api_url &&

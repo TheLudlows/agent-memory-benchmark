@@ -12,6 +12,7 @@ RUN --mount=type=cache,target=/root/.cache/uv uv sync --frozen --only-group http
 COPY src/ ./src/
 COPY data/offline/ ./data/offline/
 COPY data/beam/ ./data/beam/
+COPY data/lifebench/ ./data/lifebench/
 COPY data/longmemeval/ ./data/longmemeval/
 RUN --mount=type=cache,target=/root/.cache/uv uv pip install --no-deps --editable .
 ENTRYPOINT ["amb"]

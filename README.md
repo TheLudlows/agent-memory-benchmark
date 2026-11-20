@@ -97,7 +97,7 @@ uv run amb view
 
 ### AMB Workbench · 浏览器评测
 
-评测台支持 LoCoMo、BEAM、LongMemEval、LifeBench 2.0 中文版和 PrecisionMemBench，可搭配 ContextBase、Mem0 Cloud 或 Hindsight HTTP。
+评测台支持 LoCoMo、BEAM、LongMemEval、LifeBench 1.0 英文版、LifeBench 2.0 中文版和 PrecisionMemBench，可搭配 ContextBase、Mem0 Cloud 或 Hindsight HTTP。
 每轮填写评测名称，选择数据集、split 和后端，默认跑 5 题，也可跑全量。题数上限只限制问答，
 LoCoMo、BEAM 和 LongMemEval 仍会写入所选题目对应的会话历史。PrecisionMemBench 始终写入完整测试数据。运行详情会显示当前阶段、已用时、已写入的文档数和已处理的题数。
 写入进度每组文档处理完后更新，答题进度逐题更新。结束后可查看得分、写入耗时、平均检索延迟，
@@ -144,7 +144,7 @@ Docker Compose 使用独立的 `amb-workbench-config` 卷。升级后，旧的 `
 没有保存网页默认配置时，系统使用 `.env` 中的 `OMB_ANSWER_LLM`、`OMB_ANSWER_MODEL`、`OMB_JUDGE_LLM`、`OMB_JUDGE_MODEL` 和相应提供方的 Key。页面可随时恢复这些默认值。ContextBase 和 Hindsight 在各自服务内配置写入和检索使用的模型。
 
 可选 split 为 LoCoMo `locomo10`、BEAM `100k / 500k / 1m / 10m`、LongMemEval `s`、
-LifeBench 2.0 `zh`（3,380 题）、PrecisionMemBench `single-turn`（77 个用例）。以上数据和分词表都随仓库及
+LifeBench 1.0 `en`（2,003 题）、LifeBench 2.0 `zh`（3,380 题）、PrecisionMemBench `single-turn`（77 个用例）。以上数据和分词表都随仓库及
 镜像提供。使用完整仓库并提前安装依赖，或提前导入构建好的镜像，运行时从本地读取数据和词表，只需能访问配置的记忆后端和模型端点。
 本地文件缺失时，默认直接报告缺失项。在可联网的环境中准备缓存时，可以设置 `AMB_ALLOW_DATASET_DOWNLOADS=1`，让 AMB 下载缺失的上游文件。
 仍可通过 `LOCOMO_DATA_PATH`、
@@ -153,6 +153,7 @@ LifeBench 2.0 `zh`（3,380 题）、PrecisionMemBench `single-turn`（77 个用�
 `BEAM_DATA_PATH`，需要同时用 `BEAM_DATA_SPLIT` 指明文件所属的标准 split。没有指定本地文件的 split
 会按上述顺序加载数据。比较不同后端时，请使用相同的 split、题数和回答及评分模型。
 
+- **LifeBench 1.0 英文版**（`lifebench/en`）沿用 AMB 的评测方式。先写入所选用户的完整历史，再回答该用户的问题。全量包含 10 位用户的 3,605 个非空日会话。结果按信息提取、多跳推理、非陈述性记忆、时间与知识更新、不可回答五类统计。不可回答题即使召回为空，也会将模型回答交给评分模型。可用 `LIFEBENCH_DATA_PATH` 指向官方英文文件 `our_en.json`。
 - **LifeBench 2.0 中文版**使用官方原始中文数据。每个用户的档案、日常事件和九类手机记录按日期和来源写入，
   AMB 用中文回答，并根据参考答案和评分要点判定正误。可用 `LIFEBENCH_V2_DATA_PATH` 指向官方中文 `data/`
   目录，该目录直接包含各用户文件夹。评测按用户和提问日期推进，每批只补写截至该日期的记录，

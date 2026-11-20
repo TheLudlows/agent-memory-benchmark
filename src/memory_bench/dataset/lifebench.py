@@ -7,8 +7,8 @@ Simulates a full year of daily life for 10 fictional users with rich
 multi-modal digital traces (SMS, calls, photos, calendar, fitness, etc.)
 and 2,003 English QA pairs derived from them.
 
-Data is auto-downloaded from GitHub on first use. You can also set
-LIFEBENCH_DATA_PATH to point at a local copy of our_en.json.
+The English questions and sessions are bundled. LIFEBENCH_DATA_PATH can
+point at a local copy of the original our_en.json.
 
 Structure
 ---------
@@ -29,34 +29,39 @@ Queries    = one per QA pair per user
 Categories (query-level, by category string):
   "0" → information-extraction   (direct fact retrieval)
   "1" → multi-hop                (reasoning over multiple sources)
-  "2" → temporal-updating        (temporal reasoning, evolving info)
-  "3" → nondeclarative           (habits, preferences, emotions)
+  "2" → nondeclarative           (habits, preferences, emotions)
+  "3" → temporal-updating        (temporal reasoning, evolving info)
   "4" → unanswerable             (questions with no answer in data)
 """
 import json
-import urllib.request
+import os
+from collections import Counter
+from collections.abc import Iterator
 from datetime import datetime, timezone
 from pathlib import Path
 
 from rich.console import Console
 from rich.table import Table
 
-from ._cache import dataset_cache_dir
-from .base import Dataset
+from ..data_files import data_path, read_json
 from ..models import Document, Query
+from ._cache import cached_or_download
+from .base import Dataset
 
 _DATA_URL = (
-    "https://raw.githubusercontent.com/1754955896/LifeBench/main"
-    "/life_bench_data/locomo_format/our_en.json"
+    "https://raw.githubusercontent.com/1754955896/LifeBench/37be8131b602001b2662b6d02c6eccadad099182"
+    "/life_bench_data/version1/locomo_format/our_en.json"
 )
+_DATA_SHA256 = "9f10d933a313e9c7af9a9882888c055915dcc63968d4fc642bcc50fccaf49330"
 
 SPLITS = ["en"]
+TOTAL_QUERIES = 2003
 
 _CATEGORY_NAMES: dict[str, str] = {
     "0": "information-extraction",
     "1": "multi-hop",
-    "2": "temporal-updating",
-    "3": "nondeclarative",
+    "2": "nondeclarative",
+    "3": "temporal-updating",
     "4": "unanswerable",
 }
 
@@ -73,8 +78,7 @@ class LifeBenchDataset(Dataset):
     """
     LifeBench — long-horizon multi-source personalized memory benchmark.
 
-    Data is auto-downloaded from GitHub on first use.
-    Set LIFEBENCH_DATA_PATH to point at a local our_en.json to skip download.
+    Set LIFEBENCH_DATA_PATH to override the repository exports with a raw file.
     """
 
     name = "lifebench"
@@ -89,27 +93,22 @@ class LifeBenchDataset(Dataset):
     ]
 
     def __init__(self) -> None:
-        import os
         env = os.environ.get("LIFEBENCH_DATA_PATH")
-        self._local_path: Path | None = Path(env) if env else None
+        self._local_path: Path | None = Path(env).expanduser() if env else None
 
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
 
-    def _data_path(self) -> Path:
-        if self._local_path:
-            return self._local_path
-        cache = dataset_cache_dir("lifebench")
-        path = cache / "our_en.json"
-        if not path.exists():
-            print("Downloading LifeBench dataset…")
-            urllib.request.urlretrieve(_DATA_URL, path)
-        return path
+    def _bundle(self, split: str, filename: str) -> Path | None:
+        if split not in self.splits:
+            raise ValueError(f"Unknown LifeBench split: {split}")
+        path = data_path(self.name, split, filename)
+        return path if self._local_path is None and path.is_file() else None
 
     def _load_raw(self) -> list[dict]:
-        with open(self._data_path(), encoding="utf-8") as f:
-            return json.load(f)
+        path = self._local_path or cached_or_download(self.name, "our_en.json", _DATA_URL, _DATA_SHA256)
+        return read_json(path)
 
     @staticmethod
     def _session_keys(conv: dict) -> list[str]:
@@ -149,12 +148,22 @@ class LifeBenchDataset(Dataset):
                     mapping[str(turn["dia_id"])] = key
         return mapping
 
-    @staticmethod
-    def _session_content(turns: list) -> str:
-        return json.dumps(turns)
+    def _sessions(self, split: str) -> Iterator[tuple[str, str, str | None, str | list]]:
+        bundle = self._bundle(split, "documents.json.gz")
+        if bundle:
+            for row in read_json(bundle):
+                user = row["user_id"]
+                session = row["id"].removeprefix(f"{user}_")
+                yield user, session, row["timestamp"], row["content"]
+            return
 
-    def _user_ids(self) -> list[str]:
-        return [item["sample_id"] for item in self._load_raw()]
+        for item in self._load_raw():
+            conversation = item["conversation"]
+            for session in self._session_keys(conversation):
+                turns = conversation[session]
+                if turns:
+                    timestamp = self._parse_date(conversation.get(f"{session}_date_time"))
+                    yield item["sample_id"], session, timestamp, turns
 
     # ------------------------------------------------------------------
     # Dataset interface
@@ -163,7 +172,15 @@ class LifeBenchDataset(Dataset):
     def categories(self, split: str) -> list[str] | None:
         # Doc categories: one per user (isolates document space)
         # Query categories: question types (same docs, different query filter)
-        return self._user_ids() + list(_CATEGORY_NAMES.values())
+        bundle = self._bundle(split, "queries.json.gz")
+        if bundle:
+            users = dict.fromkeys(row["user_id"] for row in read_json(bundle))
+        else:
+            users = [item["sample_id"] for item in self._load_raw()]
+        return [*users, *_CATEGORY_NAMES.values()]
+
+    def should_judge_empty_context(self, meta: dict) -> bool:
+        return meta.get("category") == "unanswerable"
 
     def category_type(self, split: str, category: str) -> str:
         return "query" if category in _CATEGORY_NAMES.values() else "doc"
@@ -238,8 +255,6 @@ If it's correct, set correct=true.
         category: str | None = None,
         limit: int | None = None,
     ) -> list[Query]:
-        data = self._load_raw()
-
         # Determine filter type
         cat_filter: str | None = None    # question-type filter (category name)
         user_filter: str | None = None   # user filter (sample_id)
@@ -249,8 +264,17 @@ If it's correct, set correct=true.
             else:
                 user_filter = category
 
+        bundle = self._bundle(split, "queries.json.gz")
+        if bundle:
+            queries = [
+                Query(**row) for row in read_json(bundle)
+                if (user_filter is None or row["user_id"] == user_filter)
+                and (cat_filter is None or row["meta"]["category"] == cat_filter)
+            ]
+            return queries[:limit] if limit else queries
+
         queries: list[Query] = []
-        for item in data:
+        for item in self._load_raw():
             sample_id = item["sample_id"]
             if user_filter is not None and sample_id != user_filter:
                 continue
@@ -309,65 +333,37 @@ If it's correct, set correct=true.
         ids: set[str] | None = None,
         user_ids: set[str] | None = None,
     ) -> list[Document]:
-        data = self._load_raw()
         documents: list[Document] = []
 
         # Doc-category filter: restrict to a single user
         user_filter = category if category and category not in _CATEGORY_NAMES.values() else None
 
-        for item in data:
-            sample_id = item["sample_id"]
-            if user_filter is not None and sample_id != user_filter:
+        for user, session, timestamp, turns in self._sessions(split):
+            if user_filter is not None and user != user_filter:
                 continue
-            if user_ids is not None and sample_id not in user_ids:
+            if user_ids is not None and user not in user_ids:
                 continue
-
-            conv = item["conversation"]
-            session_keys = self._session_keys(conv)
-
-            for sk in session_keys:
-                doc_id = f"{sample_id}_{sk}"
-                if ids is not None and doc_id not in ids:
-                    continue
-                turns = conv.get(sk, [])
-                if not turns:
-                    continue
-                timestamp = self._parse_date(conv.get(f"{sk}_date_time"))
-                content = self._session_content(turns)
-                date_display = timestamp or "unknown date"
-                ctx = f"User '{sample_id}' — {sk} ({date_display})"
-                documents.append(Document(
-                    id=doc_id,
-                    content=content,
-                    user_id=sample_id,
-                    timestamp=timestamp,
-                    context=ctx,
-                ))
-
-        if limit and ids is None:
-            documents = documents[:limit]
-        return documents
+            doc_id = f"{user}_{session}"
+            if ids is not None and doc_id not in ids:
+                continue
+            documents.append(Document(
+                id=doc_id, user_id=user, timestamp=timestamp,
+                content=turns if isinstance(turns, str) else json.dumps(turns),
+                context=f"User '{user}' — {session} ({timestamp or 'unknown date'})",
+            ))
+        return documents[:limit] if limit and ids is None else documents
 
     def dataset_stats(self, console: Console, **_) -> None:
-        data = self._load_raw()
         table = Table(title="LifeBench dataset stats")
         table.add_column("Metric", style="bold")
         table.add_column("Value", justify="right")
 
-        from collections import Counter
-        cat_counts: Counter = Counter()
-        n_sessions = 0
-        for item in data:
-            n_sessions += len(self._session_keys(item["conversation"]))
-            for qa in item.get("qa", []):
-                cat_str = str(qa.get("category", ""))
-                cat_name = _CATEGORY_NAMES.get(cat_str, cat_str)
-                cat_counts[cat_name] += 1
-
-        n_qa = sum(cat_counts.values())
-        table.add_row("Users", str(len(data)))
-        table.add_row("Sessions (docs)", str(n_sessions))
-        table.add_row("QA pairs", str(n_qa))
+        queries = self.load_queries("en")
+        cat_counts = Counter(q.meta["category"] for q in queries)
+        documents = self.load_documents("en")
+        table.add_row("Users", str(len({q.user_id for q in queries} | {d.user_id for d in documents})))
+        table.add_row("Sessions (docs)", str(len(documents)))
+        table.add_row("QA pairs", str(len(queries)))
         for cat_name in _CATEGORY_NAMES.values():
             label = _CATEGORY_LABELS.get(cat_name, cat_name)
             table.add_row(f"  {label}", str(cat_counts.get(cat_name, 0)))

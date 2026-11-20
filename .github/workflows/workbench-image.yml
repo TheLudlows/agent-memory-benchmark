@@ -9,6 +9,7 @@ on:
       - src/**
       - data/offline/**
       - data/beam/**
+      - data/lifebench/**
       - data/longmemeval/**
       - pyproject.toml
       - uv.lock
@@ -54,6 +55,7 @@ jobs:
               'locomo': {'locomo10': 1540},
               'beam': {'100k': 400, '500k': 700, '1m': 700, '10m': 200},
               'longmemeval': {'s': 500},
+              'lifebench': {'en': 2003},
               'lifebench-v2': {'zh': 3380},
               'precisionmembench': {'single-turn': 77},
           }
@@ -91,6 +93,7 @@ jobs:
               'locomo': ['locomo10'],
               'beam': ['100k', '500k', '1m', '10m'],
               'longmemeval': ['s'],
+              'lifebench': ['en'],
               'lifebench-v2': ['zh'],
               'precisionmembench': ['single-turn'],
           }, config['datasets']

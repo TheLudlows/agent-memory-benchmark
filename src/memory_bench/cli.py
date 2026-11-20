@@ -55,10 +55,10 @@ def run(
 ) -> None:
     """Run an evaluation on a single split (optionally filtered to a category)."""
     if memory == "contextbase":
-        rag_datasets = {"locomo", "locomo-fixed", "beam", "longmemeval", "lifebench-v2"}
+        rag_datasets = {"locomo", "locomo-fixed", "beam", "longmemeval", "lifebench", "lifebench-v2"}
         if (dataset, mode) != ("precisionmembench", "retrieval") and (dataset not in rag_datasets or mode != "rag"):
             raise typer.BadParameter(
-                "ContextBase supports LoCoMo, BEAM, LongMemEval and LifeBench 2.0 in rag mode, "
+                "ContextBase supports LoCoMo, BEAM, LongMemEval and LifeBench 1.0 / 2.0 in rag mode, "
                 "and PrecisionMemBench in retrieval mode.", param_hint="--memory",
             )
     no_llm = mode == "retrieval"  # search only: no answer model, no judge, no LLM key needed

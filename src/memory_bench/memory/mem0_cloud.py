@@ -1,12 +1,13 @@
 import os
 import time
 import uuid
+from json import JSONDecodeError
 from pathlib import Path
 
 from rich.console import Console
 
 from ..models import Document
-from .base import MemoryProvider
+from .base import MemoryProvider, RetrievalError
 
 _console = Console()
 
@@ -88,23 +89,42 @@ class Mem0CloudMemoryProvider(MemoryProvider):
     def retrieve(
         self, query: str, k: int = 10, user_id: str | None = None, query_timestamp: str | None = None
     ) -> tuple[list[Document], dict | None]:
+        from mem0.exceptions import MemoryError as Mem0Error
+
         uid = self._user_id(user_id)
-        results = self._ensure_client().search(query, filters={"user_id": uid}, top_k=self.k)
-        entries = results.get("results", results) if isinstance(results, dict) else results
+        client = self._ensure_client()
+        try:
+            results = client.search(query, filters={"user_id": uid}, top_k=self.k)
+        except JSONDecodeError as exc:
+            raise RetrievalError("Mem0 Cloud Recall returned invalid JSON") from exc
+        except Mem0Error as exc:
+            status = exc.debug_info.get("status_code")
+            failure = f"HTTP {status}" if isinstance(status, int) else type(exc).__name__
+            raise RetrievalError(f"Mem0 Cloud Recall failed ({failure})") from exc
+        entries = results.get("results") if isinstance(results, dict) else results
+        if not isinstance(entries, list):
+            raise RetrievalError("Mem0 Cloud Recall returned an invalid results list")
         raw = results if isinstance(results, dict) else {"results": results}
         docs = []
         for r in entries:
+            if not isinstance(r, dict) or not isinstance(r.get("id"), str) or not isinstance(r.get("memory"), str):
+                raise RetrievalError("Mem0 Cloud Recall returned an invalid memory entry")
             lines = [r["memory"]]
-            if r.get("score") is not None:
-                lines.append(f"score: {r['score']:.3f}")
+            score = r.get("score")
+            if score is not None:
+                if not isinstance(score, (int, float)):
+                    raise RetrievalError("Mem0 Cloud Recall returned an invalid memory score")
+                lines.append(f"score: {score:.3f}")
             if r.get("created_at"):
                 lines.append(f"created: {r['created_at']}")
             if r.get("updated_at"):
                 lines.append(f"updated: {r['updated_at']}")
-            meta = r.get("metadata") or {}
+            meta = r.get("metadata")
+            if meta is not None and not isinstance(meta, dict):
+                raise RetrievalError("Mem0 Cloud Recall returned invalid memory metadata")
             if meta:
                 lines.append(f"metadata: {meta}")
-            doc_id = meta.get("doc_id")
+            doc_id = meta.get("doc_id") if meta else None
             docs.append(Document(id=r["id"], content="\n".join(lines),
                                  source_ids=[doc_id] if doc_id else None))
         return docs, raw

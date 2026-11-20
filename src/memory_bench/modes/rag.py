@@ -86,7 +86,7 @@ class RAGMode(ResponseMode):
         else:
             prompt = _DEFAULT_MCQ_PROMPT.format(context=context, query=query)
         data = self._llm.generate(prompt, _MCQ_SCHEMA)
-        choice = data["choice"].strip().lower().strip("(). ")[:1]
+        choice = data["choice"].strip().lower().strip("(). ")
         return AnswerResult(
             answer=choice,
             reasoning=data["reasoning"],

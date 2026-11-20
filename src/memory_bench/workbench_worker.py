@@ -13,6 +13,7 @@ from time import monotonic
 
 from .dataset import get_dataset
 from .dataset.beam import BEAMDataset
+from .dataset.personamem_offline import OfflinePersonaMemDataset
 from .json_files import is_windows_file_contention, write_json
 from .judge import GeminiJudge, ScoringError
 from .memory import get_memory_provider
@@ -70,12 +71,17 @@ def run(directory: Path) -> int:
 
     models = job["models"]
     answer_llm = worker_model("answer", models["answer"]) if spec.mode == "rag" else None
-    judge_llm = worker_model("judge", models["judge"]) if spec.mode == "rag" else None
+    judge_llm = worker_model("judge", models["judge"]) if "judge" in models else None
     runner = EvalRunner(
         output_dir=directory / "results", on_progress=progress, on_documents=record_documents,
         judge_llm=judge_llm,
     )
-    dataset = BEAMDataset(require_local_split=True) if spec.dataset == "beam" else get_dataset(spec.dataset)
+    if spec.dataset == "beam":
+        dataset = BEAMDataset(require_local_split=True)
+    elif spec.dataset == "personamem":
+        dataset = OfflinePersonaMemDataset(spec.split)
+    else:
+        dataset = get_dataset(spec.dataset)
     summary = runner.run(
         dataset=dataset, split=spec.split, memory=memory,
         mode=get_mode(spec.mode, llm=answer_llm), query_limit=spec.query_limit, run_name="web-" + run_id,
@@ -96,7 +102,9 @@ def run(directory: Path) -> int:
         if spec.mode == "retrieval":
             question.extend(row.meta.get(key) for key in ("scope", "budget", "expect"))
             question.append("source_attribution_required")
-        if dataset.query_timestamp_cutoff:
+        if spec.dataset == "personamem":
+            question.append(row.meta["context_end"])
+        elif dataset.incremental_history:
             question.append("ingest_until_query_time")
         question_digest.update((json.dumps(question, ensure_ascii=False, sort_keys=True) + "\n").encode("utf-8"))
     write_json(directory / "summary.json", {

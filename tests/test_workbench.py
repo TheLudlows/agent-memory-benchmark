@@ -102,7 +102,7 @@ def mock_services(monkeypatch, recall_gate):
                     self.send_json({"error": {"message": "response_format json_schema not supported"}}, status=400)
                     return
                 schema = response_format["json_schema"]["schema"] if response_format else json.loads(prompt.splitlines()[-1])
-                values = {"answer": "Paris", "reasoning": "From memory", "score": 1.0, "correct": True, "reason": "Match"}
+                values = {"answer": "Paris", "choice": "a", "reasoning": "From memory", "score": 1.0, "correct": True, "reason": "Match"}
                 if body["model"] == "judge-probe-invalid":
                     values["correct"] = "true"
                 elif body["model"] == "answer-probe-invalid":
@@ -222,6 +222,7 @@ def test_standard_question_counts_without_loading_datasets(monkeypatch, tmp_path
         for dataset, split, count in (
             ("locomo", "locomo10", 1540), ("longmemeval", "s", 500),
             ("lifebench", "en", 2003), ("lifebench-v2", "zh", 3380), ("precisionmembench", "single-turn", 77),
+            ("personamem", "32k", 589), ("personamem", "128k", 2727), ("personamem", "1M", 2674),
             ("beam", "100k", 400), ("beam", "500k", 700), ("beam", "1m", 700), ("beam", "10m", 200),
         ):
             response = client.get(f"/api/datasets/{dataset}/{split}/query-count")
@@ -312,7 +313,7 @@ Path.replace = replace
         assert client.get("/").status_code == 200
         assert client.get("/assets/workbench.js").status_code == 200
         config = client.get("/api/config").json()
-        assert set(config["datasets"]) == {case[0] for case in fixtures} | {"lifebench", "lifebench-v2", "precisionmembench"}
+        assert set(config["datasets"]) == {case[0] for case in fixtures} | {"lifebench", "lifebench-v2", "precisionmembench", "personamem"}
         assert set(config["backends"]) == {"contextbase", "mem0-cloud", "hindsight-http"}
         assert config["backends"]["contextbase"]["missing"] == ["API 地址", "API Key", "Bank ID"]
 
@@ -1321,6 +1322,81 @@ def test_lifebench_unanswerable_distinguishes_empty_recall_from_http_error(monke
         assert "403" in failed["judge_reason"]
         prompts = [body["messages"][0]["content"] for path, body in calls if path.endswith("/chat/completions")]
         assert len(prompts) == 2 and all(questions[0] in prompt for prompt in prompts)
+
+
+@pytest.mark.parametrize("backend", ["contextbase", "hindsight-http", "mem0-cloud"])
+def test_personamem_workbench_scores_choices_with_the_visible_prefix(monkeypatch, tmp_path, mock_services, backend):
+    from memory_bench.dataset.personamem_offline import OfflinePersonaMemDataset
+    from memory_bench.runner import _history_batches
+
+    endpoint, calls = mock_services
+    monkeypatch.setenv("OPENAI_BASE_URL", endpoint + "/v1")
+    monkeypatch.setenv("OPENAI_API_KEY", "test-model-key")
+    monkeypatch.setenv("OMB_ANSWER_LLM", "openai")
+    monkeypatch.setenv("OMB_JUDGE_LLM", "gemini")
+    for name in ("GEMINI_API_KEY", "GOOGLE_API_KEY"):
+        monkeypatch.delenv(name, raising=False)
+    dataset = OfflinePersonaMemDataset("32k")
+    queries = dataset.load_queries("32k", limit=10)
+    users = {q.user_id for q in queries}
+    assert len(users) == 2
+    documents = dataset.load_documents("32k", user_ids=users)
+    expected_history = {}
+    for user in users:
+        docs = [doc for doc in documents if doc.user_id == user]
+        history = []
+        for new_docs, questions in _history_batches(dataset, docs, [q for q in queries if q.user_id == user]):
+            history.extend(new_docs)
+            for _, q in questions:
+                expected_history[(user, q.meta["retrieval_query"])] = list(history)
+
+    with TestClient(create_app(tmp_path / "runs"), base_url="http://127.0.0.1") as client:
+        config = client.get("/api/config").json()
+        assert config["datasets"]["personamem"] == ["32k", "128k", "1M"]
+        assert config["choice_datasets"] == ["personamem"]
+        conn = {"api_url": endpoint, "api_key": "test-bearer-value"}
+        if backend == "contextbase":
+            conn["bank_id"] = "ui-bank"
+        url, detail = await_result(client, client.post("/api/runs", json={
+            "name": "PersonaMem", "dataset": "personamem", "split": "32k",
+            "backend": backend, "query_limit": len(queries), "connection": conn,
+        }))
+        assert detail["status"] == "completed", detail["log"]
+        assert detail["progress"]["completed"] == len(queries)
+        assert set(detail["models"]) == {"answer"}
+        assert detail["summary"]["judge_llm"] is None
+        assert detail["summary"]["correct"] == sum(q.gold_answers[-1] == "a" for q in queries)
+        assert client.get(url + "/question-types").json()["rows"]
+        rows = client.get(url + "/result").json()["results"]
+        assert {r["query_id"] for r in rows} == {q.id for q in queries}
+
+    seen: dict = {}
+    recalled = set()
+    for path, payload in calls:
+        if path.endswith("/memories"):
+            for item in payload["items"]:
+                scope = tuple(item["tags"]) if backend == "contextbase" else path
+                seen.setdefault(scope, []).append(item["content"])
+        elif path == "/v1/memories/":
+            seen.setdefault(payload["user_id"], []).append(payload["messages"])
+            assert payload["async_mode"] is False
+        elif path.endswith(("/recall", "/search/")):
+            if backend == "mem0-cloud":
+                scope = payload["filters"]["user_id"]
+                user = scope.rsplit("-", 1)[-1]
+                expected = [doc.messages for doc in expected_history[(user, payload["query"])]]
+            elif backend == "contextbase":
+                scope = tuple(payload["tags"])
+                user = next(tag.removeprefix("amb-unit:") for tag in scope if tag.startswith("amb-unit:"))
+                expected = [doc.content for doc in expected_history[(user, payload["query"])]]
+            else:
+                scope = path.removesuffix("/recall")
+                user = scope.removesuffix("/memories").rsplit("-u", 1)[-1]
+                expected = [doc.content for doc in expected_history[(user, payload["query"])]]
+            assert seen[scope] == expected
+            recalled.add((user, payload["query"]))
+    assert recalled == set(expected_history)
+    assert sum(path.endswith("/chat/completions") for path, _ in calls) == len(queries)
 
 
 @pytest.mark.parametrize("backend", ["contextbase", "hindsight-http", "mem0-cloud"])

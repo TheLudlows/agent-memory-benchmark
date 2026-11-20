@@ -35,27 +35,26 @@ def _score_mcq(answer: str, gold_answers: list[str]) -> tuple[bool, str]:
     def norm(s: str) -> str:
         return s.strip().lower().strip("(). ")[:1]
 
-    answer_letter = norm(answer)
-    for gold in gold_answers:
-        if norm(gold) == answer_letter:
-            return True, "letter match"
+    answer_letter = answer.strip().lower().strip("(). ")
+    if answer_letter in {"a", "b", "c", "d"} and any(norm(gold) == answer_letter for gold in gold_answers):
+        return True, "letter match"
     return False, f"expected one of {gold_answers!r}, got {answer!r}"
 
 
-def _query_time_batches(
-    documents: list[Document], queries: list[Query],
+def _history_batches(
+    dataset: Dataset, documents: list[Document], queries: list[Query],
 ) -> list[tuple[list[Document], list[tuple[int, Query]]]]:
     """Schedule each document once, before the first query that can see it."""
-    documents = sorted(documents, key=lambda doc: doc.timestamp or "")
-    timestamps = [doc.timestamp or "" for doc in documents]
+    documents = sorted(documents, key=dataset.document_history_position)
+    positions = [dataset.document_history_position(doc) for doc in documents]
 
-    def cutoff(row: tuple[int, Query]) -> str:
-        return row[1].meta["query_timestamp"]
+    def cutoff(row: tuple[int, Query]) -> int | str:
+        return dataset.query_history_position(row[1])
 
     batches = []
     start = 0
-    for timestamp, rows in groupby(sorted(enumerate(queries), key=cutoff), key=cutoff):
-        end = bisect_right(timestamps, timestamp, lo=start)
+    for position, rows in groupby(sorted(enumerate(queries), key=cutoff), key=cutoff):
+        end = bisect_right(positions, position, lo=start)
         batches.append((documents[start:end], list(rows)))
         start = end
     return batches
@@ -125,11 +124,11 @@ class EvalRunner:
         if oracle and not dataset.supports_oracle():
             raise ValueError(f"Dataset '{dataset.name}' does not support oracle mode (no gold_ids)")
 
-        if dataset.query_timestamp_cutoff:
+        if dataset.incremental_history:
             if not memory.supports_incremental_ingest:
-                raise ValueError(f"{memory.name} cannot ingest {dataset.name} incrementally by query date.")
+                raise ValueError(f"{memory.name} cannot ingest {dataset.name} incrementally for each question.")
             if skip_ingestion or skip_retrieval or skip_answer:
-                raise ValueError(f"{dataset.name} requires a fresh history for each run to enforce the query date.")
+                raise ValueError(f"{dataset.name} requires a fresh history for each run to enforce each question’s history cutoff.")
         if task_type == "retrieval" and (skip_retrieval or skip_answer):
             raise ValueError("Retrieval benchmarks require fresh search results with source IDs.")
 
@@ -430,7 +429,7 @@ class EvalRunner:
                 if uid is not None and uid in queries_by_unit:
                     docs_by_unit.setdefault(uid, []).append(doc)
             batches_by_unit = {
-                uid: (_query_time_batches(docs, queries_by_unit[uid]) if dataset.query_timestamp_cutoff
+                uid: (_history_batches(dataset, docs, queries_by_unit[uid]) if dataset.incremental_history
                       else [(docs, list(enumerate(queries_by_unit[uid])))])
                 for uid, docs in docs_by_unit.items()
             }
@@ -490,7 +489,7 @@ class EvalRunner:
                         ingested_docs=ingested_docs_count, ingestion_wall_time_ms=ingestion_wall_snapshot(),
                         score_type=dataset.score_type,
                         description=description, answer_llm=mode.llm_id,
-                        judge_llm=(None if dataset.task_type in ("coding", "retrieval") else self._get_judge(dataset)._llm.model_id),
+                        judge_llm=(None if dataset.task_type in ("coding", "mcq", "retrieval") else self._get_judge(dataset)._llm.model_id),
                         results=done, ingestion_run_id=memory.ingestion_run_id,
                     ))
 
@@ -502,7 +501,7 @@ class EvalRunner:
                     if write_interval_start is None:
                         write_interval_start = t0
                     try:
-                        if dataset.query_timestamp_cutoff:
+                        if dataset.incremental_history:
                             await memory.async_ingest_increment(documents, first=first)
                         else:
                             await memory.async_ingest(documents)
@@ -624,7 +623,7 @@ class EvalRunner:
             score_type=dataset.score_type,
             description=description,
             answer_llm=mode.llm_id,
-            judge_llm=(None if dataset.task_type in ("coding", "retrieval") else self._get_judge(dataset)._llm.model_id),
+            judge_llm=(None if dataset.task_type in ("coding", "mcq", "retrieval") else self._get_judge(dataset)._llm.model_id),
             results=results,
             ingestion_run_id=memory.ingestion_run_id,
         )

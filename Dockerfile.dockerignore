@@ -12,5 +12,7 @@
 !data/lifebench/**
 !data/longmemeval/
 !data/longmemeval/**
+!data/personamem/
+!data/personamem/**
 **/__pycache__/
 **/*.pyc

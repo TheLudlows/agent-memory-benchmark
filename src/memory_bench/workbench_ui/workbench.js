@@ -1,14 +1,18 @@
 const $ = (id) => document.getElementById(id);
 const names = {
-  locomo: "LoCoMo", beam: "BEAM", longmemeval: "LongMemEval",
+  locomo: "LoCoMo", beam: "BEAM", longmemeval: "LongMemEval", personamem: "PersonaMem v1",
   lifebench: "LifeBench 1.0 英文版", "lifebench-v2": "LifeBench 2.0 中文版",
   precisionmembench: "PrecisionMemBench",
 };
 const statuses = { running: "运行中", cancelling: "停止中", completed: "已完成", scoring_incomplete: "评分未完成", failed: "失败", cancelled: "已停止", interrupted: "已中断" };
 const retrievalOnly = (dataset) => settings?.retrieval_datasets?.includes(dataset);
-const modelLabels = (job) => retrievalOnly(job.selection.dataset)
-  ? "纯检索评测"
-  : `回答 ${storedModelDetail(job, "answer")} · 评分 ${storedModelDetail(job, "judge")}`;
+const choiceOnly = (dataset) => settings?.choice_datasets?.includes(dataset);
+const modelLabels = (job) => {
+  const dataset = job.selection.dataset;
+  if (retrievalOnly(dataset)) return "纯检索评测";
+  const answer = `回答 ${storedModelDetail(job, "answer")}`;
+  return choiceOnly(dataset) ? answer : `${answer} · 评分 ${storedModelDetail(job, "judge")}`;
+};
 const stages = {
   loading: "加载数据集", ingesting: "写入记忆", evaluating: "检索、回答与评分",
   ingesting_and_evaluating: "同时写入和答题", finalizing: "整理评测结果",
@@ -46,6 +50,12 @@ const questionTypeLabels = new Map(Object.entries({
   "information-extraction": "信息提取", "temporal-updating": "时间推理与知识更新",
   nondeclarative: "非陈述性记忆", unanswerable: "不可回答",
   "multi-session": "跨会话", "knowledge-update": "知识更新", "temporal-reasoning": "时间推理",
+  recall_user_shared_facts: "回忆用户分享的事实", recalling_facts_mentioned_by_the_user: "回忆用户提到的细节",
+  generalizing_to_new_scenarios: "迁移到新场景", generalize_to_new_scenarios: "迁移到新场景",
+  provide_preference_aligned_recommendations: "按偏好推荐", suggest_new_ideas: "提出新点子",
+  acknowledge_latest_user_preferences: "识别最新偏好", track_full_preference_evolution: "追踪偏好演变",
+  track_full_preference_updates: "追踪偏好演变", revisit_reasons_behind_preference_updates: "回忆偏好变化的原因",
+  recalling_the_reasons_behind_previous_updates: "回忆偏好变化的原因",
 }));
 
 const modelRoles = { answer: "回答模型", judge: "评分模型" };
@@ -293,11 +303,13 @@ function updateForm() {
   for (const editor of Object.values(modelEditors)) updateModelEditor(editor);
   const dataset = $("dataset").value;
   const retrieval = retrievalOnly(dataset);
-  const missing = Object.keys(modelRoles).filter((role) => !settings.models[role].has_key);
+  const roles = choiceOnly(dataset) ? ["answer"] : Object.keys(modelRoles);
+  const missing = roles.filter((role) => !settings.models[role].has_key);
   const modelError = !retrieval && missing.length
     ? `请在「全局模型设置」配置${missing.map((role) => modelRoles[role]).join("和")}。` : "";
   $("dataset-coverage").textContent = retrieval ? "纯检索评分，写入完整测试数据。"
     : dataset === "lifebench" ? "按用户写入完整会话历史，再回答所选题目。"
+    : choiceOnly(dataset) ? "按每题可见的对话范围增量写入，四选一按答案字母判分。"
     : dataset === "lifebench-v2" ? "按提问日期写入记录，之后的资料在该题作答时不可见。"
     : "限制题数时，仍会写入所选题目对应的会话历史。";
   const ready = $("evaluation-name").value.trim() && connection.api_url &&
@@ -366,28 +378,32 @@ function comparisonWarning(runs) {
   const differs = (values) => new Set(values.filter((value) => value != null && value !== "")).size > 1;
   const questions = runs.map((run) => run.summary.question_fingerprint);
   const documents = runs.map((run) => run.summary.document_fingerprint);
-  const answerModels = runs.map((run) => storedModelLabel(run, "answer"));
-  const judgeModels = runs.map((run) => storedModelLabel(run, "judge"));
-  const endpoints = (role) => runs.map((run) => run.models?.[role]?.api_url);
+  const answerRuns = runs.filter((run) => !retrievalOnly(run.selection.dataset));
+  const answerModels = answerRuns.map((run) => storedModelLabel(run, "answer"));
+  const judgeRuns = answerRuns.filter((run) => !choiceOnly(run.selection.dataset));
+  const judgeModels = judgeRuns.map((run) => storedModelLabel(run, "judge"));
+  const endpoints = (group, role) => group.map((run) => run.models?.[role]?.api_url);
+  const missingEndpointFor = (group, role) => group.some((run) =>
+    storedModelLabel(run, role)?.startsWith("openai:") && !run.models?.[role]?.api_url);
   const selectionDiffers = ["dataset", "split"].some((key) => differs(runs.map((run) => run.selection[key])));
   const mismatches = [];
   if (selectionDiffers || differs(questions) || differs(runs.map((run) => run.summary.total_queries))) {
     mismatches.push("题目");
   }
   if (differs(documents)) mismatches.push("写入资料");
-  if (differs(answerModels) || differs(endpoints("answer"))) mismatches.push("回答模型");
-  if (differs(judgeModels) || differs(endpoints("judge"))) mismatches.push("评分模型");
-  const missingEndpoint = ["answer", "judge"].some((role) => runs.some((run) =>
-    storedModelLabel(run, role)?.startsWith("openai:") && !run.models?.[role]?.api_url));
-  const checkModels = runs.some((run) => !retrievalOnly(run.selection.dataset));
-  const fields = checkModels ? [questions, documents, answerModels, judgeModels] : [questions, documents];
+  if (differs(answerModels) || differs(endpoints(answerRuns, "answer"))) mismatches.push("回答模型");
+  if (differs(judgeModels) || differs(endpoints(judgeRuns, "judge"))) mismatches.push("评分模型");
+  const missingEndpoint = missingEndpointFor(answerRuns, "answer") || missingEndpointFor(judgeRuns, "judge");
+  const fields = [questions, documents, answerModels, judgeModels];
   const missing = missingEndpoint || fields
     .some((values) => values.some((value) => !value));
   const unknown = "部分评测缺少题目、写入资料或模型信息，无法确认这些评测的口径。";
   if (mismatches.length) {
     return `${mismatches.join("、")}不同，分数不可直接比较。` + (missing ? unknown : "");
   }
-  return missing ? unknown : checkModels ? "题目、写入资料、回答模型和评分模型一致。" : "题目和写入资料一致。";
+  if (missing) return unknown;
+  if (judgeRuns.length) return "题目、写入资料、回答模型和评分模型一致。";
+  return answerRuns.length ? "题目、写入资料和回答模型一致。" : "题目和写入资料一致。";
 }
 
 const wallWriteTime = (summary) => summary.ingestion_wall_time_ms;
@@ -655,9 +671,10 @@ async function loadDetail(id) {
       && job.models?.answer?.api_url === job.models?.judge?.api_url;
     $("run-answer-label").textContent = shared ? "回答与评分模型" : modelRoles.answer;
     $("run-answer-model").textContent = storedModelDetail(job, "answer");
-    $("run-judge-label").hidden = shared;
-    $("run-judge-model").hidden = shared;
-    $("run-judge-model").textContent = shared ? "" : storedModelDetail(job, "judge");
+    const hideJudge = shared || choiceOnly(job.selection.dataset);
+    $("run-judge-label").hidden = hideJudge;
+    $("run-judge-model").hidden = hideJudge;
+    $("run-judge-model").textContent = hideJudge ? "" : storedModelDetail(job, "judge");
   }
   const target = job.target;
   $("run-target").hidden = !target?.api_url;

@@ -11,6 +11,7 @@ on:
       - data/beam/**
       - data/lifebench/**
       - data/longmemeval/**
+      - data/personamem/**
       - pyproject.toml
       - uv.lock
       - .env.example
@@ -48,6 +49,7 @@ jobs:
         run: |
           docker run --rm --network none -i --entrypoint python amb-workbench:local - <<'PY'
           from memory_bench.dataset import get_dataset
+          from memory_bench.dataset.personamem_offline import OfflinePersonaMemDataset
           from memory_bench.utils import count_tokens
 
           assert count_tokens('Agent Memory Benchmark') > 0
@@ -67,6 +69,13 @@ jobs:
                   docs = dataset.load_documents(split, user_ids={queries[0].user_id}, limit=1)
                   assert docs and docs[0].content.strip(), (name, split)
                   print(f'{name}/{split}: {len(queries)} questions')
+          for split, expected in {'32k': 589, '128k': 2727, '1M': 2674}.items():
+              dataset = OfflinePersonaMemDataset(split)
+              queries = dataset.load_queries(split)
+              assert len(queries) == expected
+              docs = dataset.load_documents(split, user_ids={queries[0].user_id}, limit=1)
+              assert docs and docs[0].messages
+              print(f'personamem/{split}: {len(queries)} questions')
           PY
       - name: Start the Workbench offline
         run: |
@@ -95,6 +104,7 @@ jobs:
               'longmemeval': ['s'],
               'lifebench': ['en'],
               'lifebench-v2': ['zh'],
+              'personamem': ['32k', '128k', '1M'],
               'precisionmembench': ['single-turn'],
           }, config['datasets']
           assert set(config['backends']) == {'contextbase', 'mem0-cloud', 'hindsight-http'}

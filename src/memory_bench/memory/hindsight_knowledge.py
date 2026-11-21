@@ -137,12 +137,15 @@ class KnowledgeApi:
                 break
         return docs
 
-    async def search(self, bank_id: str, query: str, top_k: int) -> list[Document]:
+    async def search(self, bank_id: str, query: str, top_k: int, max_tokens: int | None = None) -> list[Document]:
         """The ``top_k`` best passages, as (document id, page). The API takes a token budget, not
         a count: ask for the deepest one and keep the ranks that are scored."""
-        raw = await self._call("POST", f"/{bank_id}/search", json={"query": query, "max_tokens": SCORING_BUDGET})
+        raw = await self._call("POST", f"/{bank_id}/search", json={"query": query, "max_tokens": max_tokens or SCORING_BUDGET})
         results = json.loads(raw)["results"][:top_k]
-        return [Document(id=r["document_id"], content="", page=r.get("page")) for r in results]
+        return [
+            Document(id=r["document_id"], content=(r.get("text") or "") if max_tokens else "", page=r.get("page"))
+            for r in results
+        ]
 
 
 async def _upload(api: KnowledgeApi, bank_id: str, documents: Sequence[Document]) -> None:
@@ -204,6 +207,7 @@ class HindsightKnowledgeMemoryProvider(MemoryProvider):
     variant = "knowledge"
     link = "https://github.com/vectorize-io/hindsight"
     concurrency = SEARCH_CONCURRENCY
+    supports_filters = True
 
     def __init__(self) -> None:
         self._url = os.environ.get("HINDSIGHT_KNOWLEDGE_URL", "http://localhost:8888")
@@ -257,7 +261,7 @@ class HindsightKnowledgeMemoryProvider(MemoryProvider):
         # 503): a few retries keep one blip from failing a run; anything else still raises.
         for attempt in range(SEARCH_RETRIES + 1):
             try:
-                return await self._api().search(self._bank_id, query, k), None
+                return await self._api().search(self._bank_id, query, k, (filters or {}).get("max_tokens")), None
             except (httpx.HTTPStatusError, httpx.TransportError) as exc:
                 status = getattr(getattr(exc, "response", None), "status_code", 503)
                 if attempt == SEARCH_RETRIES or status < 500:
@@ -266,5 +270,5 @@ class HindsightKnowledgeMemoryProvider(MemoryProvider):
         raise AssertionError("unreachable")
 
     def retrieve(self, query: str, k: int = 10, user_id: str | None = None,
-                 query_timestamp: str | None = None) -> tuple[list[Document], dict | None]:
-        return asyncio.run(self.async_retrieve(query, k, user_id, query_timestamp))
+                 query_timestamp: str | None = None, filters: dict | None = None) -> tuple[list[Document], dict | None]:
+        return asyncio.run(self.async_retrieve(query, k, user_id, query_timestamp, filters))

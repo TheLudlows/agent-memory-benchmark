@@ -15,12 +15,12 @@ from pathlib import Path
 from statistics import mean
 from threading import Lock, Thread
 from time import monotonic
-from typing import Annotated, Literal
+from typing import Annotated
 from uuid import uuid4
 
 import ijson
 from anyio import open_file
-from fastapi import FastAPI, HTTPException, Query, Request
+from fastapi import APIRouter, FastAPI, HTTPException, Query, Request
 from fastapi.exception_handlers import request_validation_exception_handler
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
@@ -30,6 +30,8 @@ from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from .dataset import get_dataset
 from .dataset.beam import BEAMDataset, DEFAULT_JUDGE_MODEL, SPLITS as BEAM_SPLITS, local_data_path as beam_local_data_path
+from .dataset.knowledge import WORKBENCH_KNOWLEDGE_DATASETS
+from .dataset.knowledge_data import workbench_cache_files
 from .dataset.lifebench import SPLITS as LIFEBENCH_SPLITS, TOTAL_QUERIES as LIFEBENCH_QUERIES
 from .dataset.lifebench_v2 import SPLITS as LIFEBENCH_V2_SPLITS, TOTAL_QUERIES as LIFEBENCH_V2_QUERIES
 from .dataset.locomo import SPLITS as LOCOMO_SPLITS
@@ -50,6 +52,8 @@ DATASETS = {
     "personamem": PERSONAMEM_SPLITS,
     "precisionmembench": PRECISIONMEMBENCH_SPLITS,
 }
+KNOWLEDGE_SPLITS = {name: cls.splits for name, cls in WORKBENCH_KNOWLEDGE_DATASETS.items()}
+KNOWLEDGE_BACKEND = "hindsight-knowledge"
 RETRIEVAL_DATASETS = {"precisionmembench"}
 CHOICE_DATASETS = {"personamem"}
 QUESTION_TYPE_FIELDS = {
@@ -80,19 +84,26 @@ ASSETS = Path(__file__).with_name("workbench_ui")
 
 class RunSelection(BaseModel):
     model_config = ConfigDict(extra="forbid")
-    dataset: Literal["locomo", "beam", "longmemeval", "lifebench", "lifebench-v2", "precisionmembench", "personamem"]
+    dataset: str
     split: str
     backend: BackendId
     query_limit: int | None = Field(default=5, ge=1, strict=True)
 
     @property
+    def is_knowledge(self) -> bool:
+        return self.dataset in KNOWLEDGE_SPLITS
+
+    @property
     def mode(self) -> str:
-        return "retrieval" if self.dataset in RETRIEVAL_DATASETS else "rag"
+        return "retrieval" if self.is_knowledge or self.dataset in RETRIEVAL_DATASETS else "rag"
 
     @model_validator(mode="after")
     def check_split(self):
-        if self.split not in DATASETS[self.dataset]:
+        datasets = KNOWLEDGE_SPLITS if self.is_knowledge else DATASETS
+        if self.split not in datasets.get(self.dataset, ()):
             raise ValueError(f"Split {self.split!r} is unavailable for {self.dataset}.")
+        if self.is_knowledge != (self.backend == KNOWLEDGE_BACKEND):
+            raise ValueError("请选择此评测类型支持的后端。")
         return self
 
 
@@ -102,6 +113,9 @@ class RunRequest(RunSelection):
 
 
 def _dataset_error(dataset: str, split: str) -> str | None:
+    if dataset in KNOWLEDGE_SPLITS:
+        if any(not path.is_file() for path in workbench_cache_files(dataset, split)):
+            return f"该语料尚未准备。请先运行 amb prepare-knowledge --dataset {dataset} --split {split}。"
     if dataset == "beam":
         try:
             beam_local_data_path(split, require_split=True)
@@ -200,6 +214,8 @@ class RunManager:
                 **os.environ, **connection.worker_env(selection.backend), **model_env,
                 "NO_COLOR": "1", "PYTHONUNBUFFERED": "1", "PYTHONIOENCODING": "utf-8",
             }
+            if selection.is_knowledge:
+                env["AMB_KNOWLEDGE_OFFLINE"] = "1"
             try:
                 process = subprocess.Popen(
                     [sys.executable, "-m", "memory_bench.workbench_worker", str(directory)],
@@ -280,11 +296,22 @@ class RunManager:
         for run in runs:
             run.monitor.join(timeout=max(0, deadline - monotonic()))
 
-    def directory(self, run_id: str) -> Path:
+    def directory(self, run_id: str, knowledge: bool) -> Path:
+        if not RUN_ID.fullmatch(run_id):
+            raise HTTPException(404, "评测不存在。")
         path = self.root / run_id
-        if not RUN_ID.fullmatch(run_id) or not (path / "run.json").is_file():
+        job = _read_json(path / "run.json")
+        if not job or is_knowledge_job(job) != knowledge:
             raise HTTPException(404, "评测不存在。")
         return path
+
+
+def is_knowledge_job(job: dict) -> bool:
+    return job["selection"]["dataset"] in KNOWLEDGE_SPLITS
+
+
+def is_knowledge_request(request: Request) -> bool:
+    return request.url.path.startswith("/knowledge/")
 
 
 def _result_path(directory: Path, job: dict) -> Path:
@@ -310,6 +337,8 @@ def _context_token_report(path: Path) -> tuple[float | None, list[dict]]:
 
 
 def summarize_question_types(dataset: str, rows: Iterable[dict]) -> list[dict]:
+    if dataset in KNOWLEDGE_SPLITS:
+        return []
     axis, meta_key = QUESTION_TYPE_FIELDS[dataset]
     by_type: dict[str, dict] = {}
     for row in rows:
@@ -395,6 +424,7 @@ def create_app(output_dir: Path) -> FastAPI:
     app = FastAPI(lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)
     app.add_middleware(TrustedHostMiddleware, allowed_hosts=allowed_hosts, www_redirect=False)
     app.mount("/assets", StaticFiles(directory=ASSETS), name="assets")
+    evaluation = APIRouter()
 
     @app.middleware("http")
     async def local_writes(request: Request, call_next):
@@ -407,18 +437,31 @@ def create_app(output_dir: Path) -> FastAPI:
 
     @app.exception_handler(RequestValidationError)
     async def validation_error(request: Request, exc: RequestValidationError):
-        if request.method == "POST" and request.url.path == "/api/runs":
+        if request.method == "POST" and request.url.path in {"/api/runs", "/knowledge/api/runs"}:
             return JSONResponse({"detail": "评测配置无效，请检查名称、类型和本轮连接。"}, status_code=422)
         if request.url.path.startswith("/api/models/"):
             return JSONResponse({"detail": "模型配置格式无效，请检查提供方、模型 ID、地址和 Key。"}, status_code=422)
         return await request_validation_exception_handler(request, exc)
 
     @app.get("/")
+    @app.get("/knowledge")
     def home():
         return FileResponse(ASSETS / "index.html")
 
-    @app.get("/api/config")
-    def config():
+    @evaluation.get("/config")
+    def config(request: Request):
+        backends = manager.connections.public()
+        if is_knowledge_request(request):
+            return {
+                "datasets": KNOWLEDGE_SPLITS,
+                "retrieval_datasets": list(KNOWLEDGE_SPLITS),
+                "score_types": {name: cls.score_type for name, cls in WORKBENCH_KNOWLEDGE_DATASETS.items()},
+                "split_errors": {
+                    name: {split: error for split in splits if (error := _dataset_error(name, split))}
+                    for name, splits in KNOWLEDGE_SPLITS.items()
+                },
+                "backends": {KNOWLEDGE_BACKEND: backends[KNOWLEDGE_BACKEND]},
+            }
         return {
             "datasets": DATASETS,
             "retrieval_datasets": sorted(RETRIEVAL_DATASETS),
@@ -426,7 +469,7 @@ def create_app(output_dir: Path) -> FastAPI:
             "split_errors": {"beam": {
                 split: error for split in BEAM_SPLITS if (error := _dataset_error("beam", split))
             }},
-            "backends": manager.connections.public(),
+            "backends": {key: backends[key] for key in backends if key != KNOWLEDGE_BACKEND},
             "models": manager.models.public(),
             "model_services": manager.models.services(),
             "beam_default_judge_model": DEFAULT_JUDGE_MODEL,
@@ -499,23 +542,28 @@ def create_app(output_dir: Path) -> FastAPI:
             raise HTTPException(502, messages.get(result.returncode, f"后台调用{label}失败，请检查 API 地址和服务状态。"))
         return {"model": f"{model['provider']}:{model['model']}", "elapsed_ms": round((monotonic() - started) * 1000)}
 
-    @app.get("/api/runs")
-    def runs(limit: Annotated[int, Query(ge=1, le=100)] = 30, offset: Annotated[int, Query(ge=0)] = 0):
-        jobs = [_read_json(path) for path in manager.root.glob("*/run.json")]
+    @evaluation.get("/runs")
+    def runs(request: Request, limit: Annotated[int, Query(ge=1, le=100)] = 30,
+             offset: Annotated[int, Query(ge=0)] = 0):
+        knowledge = is_knowledge_request(request)
+        jobs = [job for path in manager.root.glob("*/run.json")
+                if (job := _read_json(path)) and is_knowledge_job(job) == knowledge]
         ordered = sorted(jobs, key=lambda job: (job["started_at"], job["id"]), reverse=True)
         return ordered[offset:offset + limit]
 
-    @app.post("/api/runs", status_code=201)
-    def start(selection: RunRequest):
+    @evaluation.post("/runs", status_code=201)
+    def start(request: Request, selection: RunRequest):
+        if is_knowledge_request(request) != selection.is_knowledge:
+            raise HTTPException(422, "当前入口不支持该评测数据集。")
         return manager.start(selection)
 
-    @app.get("/api/runs/capacity")
+    @evaluation.get("/runs/capacity")
     def run_capacity():
         return manager.capacity()
 
-    @app.get("/api/runs/{run_id}")
-    def detail(run_id: str):
-        directory = manager.directory(run_id)
+    @evaluation.get("/runs/{run_id}")
+    def detail(request: Request, run_id: str):
+        directory = manager.directory(run_id, is_knowledge_request(request))
         job = _read_json(directory / "run.json")
         return {
             **job,
@@ -525,25 +573,25 @@ def create_app(output_dir: Path) -> FastAPI:
             "log": _log_tail(directory / "run.log"),
         }
 
-    @app.get("/api/runs/{run_id}/metrics")
-    def metrics(run_id: str):
-        directory = manager.directory(run_id)
+    @evaluation.get("/runs/{run_id}/metrics")
+    def metrics(request: Request, run_id: str):
+        directory = manager.directory(run_id, is_knowledge_request(request))
         job = _read_json(directory / "run.json")
         return {**job, "summary": _run_summary(directory, job)}
 
-    @app.get("/api/runs/{run_id}/context-tokens")
-    def context_tokens(run_id: str, offset: Annotated[int, Query(ge=0)] = 0,
+    @evaluation.get("/runs/{run_id}/context-tokens")
+    def context_tokens(request: Request, run_id: str, offset: Annotated[int, Query(ge=0)] = 0,
                        limit: Annotated[int, Query(ge=1, le=100)] = 20):
-        directory = manager.directory(run_id)
+        directory = manager.directory(run_id, is_knowledge_request(request))
         job = _read_json(directory / "run.json")
         if job["status"] not in {"completed", "scoring_incomplete"}:
             raise HTTPException(404, "当前还没有完整的逐题上下文指标。")
         average, rows = _context_token_report(_result_path(directory, job))
         return {"average": average, "total": len(rows), "rows": rows[offset:offset + limit]}
 
-    @app.get("/api/runs/{run_id}/question-types")
-    def question_types(run_id: str):
-        directory = manager.directory(run_id)
+    @evaluation.get("/runs/{run_id}/question-types")
+    def question_types(request: Request, run_id: str):
+        directory = manager.directory(run_id, is_knowledge_request(request))
         job = _read_json(directory / "run.json")
         if job["status"] not in {"completed", "scoring_incomplete"}:
             raise HTTPException(404, "评测完成后可查看题型统计。")
@@ -555,15 +603,15 @@ def create_app(output_dir: Path) -> FastAPI:
                 raise HTTPException(404, "当前还没有评测结果。") from None
         return {"rows": rows}
 
-    @app.post("/api/runs/{run_id}/cancel", status_code=202)
-    def cancel(run_id: str):
-        manager.directory(run_id)
+    @evaluation.post("/runs/{run_id}/cancel", status_code=202)
+    def cancel(request: Request, run_id: str):
+        manager.directory(run_id, is_knowledge_request(request))
         manager.cancel(run_id)
         return {"status": "cancelling"}
 
-    @app.get("/api/runs/{run_id}/result")
-    def result(run_id: str):
-        directory = manager.directory(run_id)
+    @evaluation.get("/runs/{run_id}/result")
+    def result(request: Request, run_id: str):
+        directory = manager.directory(run_id, is_knowledge_request(request))
         job = _read_json(directory / "run.json")
         selection = job["selection"]
         path = _result_path(directory, job)
@@ -575,4 +623,6 @@ def create_app(output_dir: Path) -> FastAPI:
             headers={"Content-Disposition": f'attachment; filename="{filename}"'},
         )
 
+    app.include_router(evaluation, prefix="/api")
+    app.include_router(evaluation, prefix="/knowledge/api")
     return app

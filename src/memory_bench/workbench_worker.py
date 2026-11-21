@@ -5,7 +5,7 @@ import logging
 import sys
 from collections.abc import Iterable
 from dataclasses import asdict
-from hashlib import sha256
+from hashlib import file_digest, sha256
 from math import ceil
 from pathlib import Path
 from statistics import mean
@@ -66,7 +66,11 @@ def run(directory: Path) -> int:
 
     def record_documents(documents: Iterable[Document]) -> None:
         for document in documents:
-            item = json.dumps(asdict(document), ensure_ascii=False, sort_keys=True)
+            fields = asdict(document)
+            if document.path:
+                with Path(document.path).open("rb") as source:
+                    fields["path"] = file_digest(source, "sha256").hexdigest()
+            item = json.dumps(fields, ensure_ascii=False, sort_keys=True)
             document_digest.update((item + "\n").encode("utf-8"))
 
     models = job["models"]
@@ -99,7 +103,9 @@ def run(directory: Path) -> int:
             row.query_id, row.query, row.gold_answers, row.category_axes,
             row.meta.get("rubric"), row.meta.get("query_timestamp"),
         ]
-        if spec.mode == "retrieval":
+        if spec.is_knowledge:
+            question.extend(row.meta.get(key) for key in ("relevant", "gold_spans", "retrieval_filter"))
+        elif spec.mode == "retrieval":
             question.extend(row.meta.get(key) for key in ("scope", "budget", "expect"))
             question.append("source_attribution_required")
         if spec.dataset == "personamem":
@@ -109,6 +115,7 @@ def run(directory: Path) -> int:
         question_digest.update((json.dumps(question, ensure_ascii=False, sort_keys=True) + "\n").encode("utf-8"))
     write_json(directory / "summary.json", {
         "score": summary.accuracy,
+        "score_type": summary.score_type,
         "correct": summary.correct,
         "total_queries": summary.total_queries,
         "scoring_failed_queries": summary.scoring_failed_queries,
@@ -117,7 +124,7 @@ def run(directory: Path) -> int:
         "ingestion_wall_time_ms": summary.ingestion_wall_time_ms,
         "avg_retrieve_time_ms": mean(times) if times else None,
         "p95_retrieve_time_ms": times[ceil(0.95 * len(times)) - 1] if times else None,
-        "avg_context_tokens": round(mean(context_tokens), 1) if context_tokens else None,
+        "avg_context_tokens": round(mean(context_tokens), 1) if context_tokens and not spec.is_knowledge else None,
         "question_types": summarize_question_types(spec.dataset, map(vars, summary.results)),
         "question_fingerprint": question_digest.hexdigest(),
         "document_fingerprint": document_digest.hexdigest(),

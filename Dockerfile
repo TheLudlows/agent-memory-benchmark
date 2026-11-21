@@ -23,7 +23,8 @@ FROM cli AS workbench
 COPY data/personamem/ ./data/personamem/
 RUN --mount=type=cache,target=/root/.cache/uv uv sync --frozen --only-group http-runner --only-group workbench \
     && uv pip install --no-deps --editable .
-ENV AMB_WORKBENCH_CONFIG_DIR=/app/workbench-config
+ENV AMB_WORKBENCH_CONFIG_DIR=/app/workbench-config \
+    AMB_KNOWLEDGE_CACHE=/app/.datasets/knowledge
 EXPOSE 8090
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s \
     CMD python -c "from urllib.request import urlopen; urlopen('http://127.0.0.1:8090/api/config', timeout=3).close()"

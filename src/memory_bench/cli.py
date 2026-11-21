@@ -12,6 +12,7 @@ from rich.table import Table
 load_dotenv(dotenv_path=Path(__file__).parents[2] / ".env", override=True)
 
 from .dataset import REGISTRY as DATASET_REGISTRY, get_dataset
+from .dataset.knowledge import WORKBENCH_KNOWLEDGE_DATASETS
 from .llm import REGISTRY as LLM_REGISTRY, get_llm, get_answer_llm
 from .memory import REGISTRY as MEMORY_REGISTRY, get_memory_provider
 from .modes import REGISTRY as MODE_REGISTRY, get_mode
@@ -28,6 +29,23 @@ def _resolve_gemini_key() -> None:
         typer.echo("Error: GEMINI_API_KEY environment variable is not set.", err=True)
         raise typer.Exit(1)
     os.environ["GOOGLE_API_KEY"] = key
+
+
+@app.command("prepare-knowledge")
+def prepare_knowledge(
+    dataset: str = typer.Option(..., "--dataset", help=", ".join(WORKBENCH_KNOWLEDGE_DATASETS)),
+    split: str = typer.Option(..., "--split"),
+) -> None:
+    """Download and prepare one corpus split for offline Workbench runs."""
+    cls = WORKBENCH_KNOWLEDGE_DATASETS.get(dataset)
+    if cls is None:
+        raise typer.BadParameter("Choose a Workbench knowledge dataset.", param_hint="--dataset")
+    if split not in cls.splits:
+        raise typer.BadParameter(f"Available splits: {', '.join(cls.splits)}.", param_hint="--split")
+    suite = cls().suite(split)
+    if not suite.items or not suite.queries:
+        raise RuntimeError("The prepared corpus has no documents or queries.")
+    typer.echo(f"{dataset}/{split}: {len(suite.items):,} documents and {len(suite.queries):,} queries ready.")
 
 
 @app.command()

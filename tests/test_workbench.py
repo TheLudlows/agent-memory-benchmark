@@ -12,8 +12,10 @@ from types import SimpleNamespace
 from zipfile import ZipFile
 
 import pytest
+from fastapi import Request
 from fastapi.testclient import TestClient
 
+from memory_bench.dataset import knowledge_data
 from memory_bench.dataset.beam import BEAMDataset
 from memory_bench.json_files import write_json
 from memory_bench.judge import ScoringError
@@ -65,6 +67,10 @@ def mock_services(monkeypatch, recall_gate, recall_responses):
             calls.append((self.path, {}))
             if self.path.startswith("/v1/ping/"):
                 self.send_json({"org_id": "test-org", "project_id": "test-project"})
+            elif self.path.startswith("/v1/default/knowledge-banks/"):
+                ingest_path = f"{self.path}/ingest"
+                count = sum(len(body["items"]) for path, body in calls if path == ingest_path)
+                self.send_json({"ready_count": count, "failed_count": 0, "passage_count": count})
             elif "/operations?" in self.path:
                 self.send_json({
                     "bank_id": self.path.split("/")[4], "operations": [], "total": 0, "limit": 1, "offset": 0,
@@ -124,7 +130,13 @@ def mock_services(monkeypatch, recall_gate, recall_responses):
                 self.send_json({"choices": [{"message": {"content": content}}]})
                 return
             calls.append((self.path, body))
-            if self.path == "/v1/memories/":
+            if self.path == "/v1/default/knowledge-banks" or (
+                self.path.startswith("/v1/default/knowledge-banks/") and self.path.endswith("/ingest")
+            ):
+                self.send_json({})
+            elif self.path.startswith("/v1/default/knowledge-banks/") and self.path.endswith("/search"):
+                self.send_json({"results": [{"document_id": "lb-0001", "text": "delivery by Friday"}]})
+            elif self.path == "/v1/memories/":
                 self.send_json({"results": []})
             elif self.path == "/v2/memories/search/":
                 self.send_json({"results": [{"id": "mem0-fact", "memory": "Expected fact", "metadata": {"doc_id": "b-present"}}]})
@@ -213,9 +225,9 @@ def mock_services(monkeypatch, recall_gate, recall_responses):
             thread.join()
 
 
-def await_result(client, response):
+def await_result(client, response, api="/api"):
     assert response.status_code == 201, response.text
-    detail_url = f"/api/runs/{response.json()['id']}"
+    detail_url = f"{api}/runs/{response.json()['id']}"
     deadline = time.monotonic() + 40
     while True:
         detail = client.get(detail_url).json()
@@ -662,8 +674,9 @@ def test_result_download_during_checkpoint_replacement(tmp_path, replace_on):
                 updated.replace(path)
                 replaced = True
 
-        scope = {"type": "http", "method": "GET", "headers": [], "asgi": {"spec_version": "2.4"}}
-        await endpoint(run_id)(scope, None, send)
+        scope = {"type": "http", "method": "GET", "headers": [], "asgi": {"spec_version": "2.4"},
+                 "path": f"/api/runs/{run_id}/result"}
+        await endpoint(Request(scope), run_id)(scope, None, send)
         body = b"".join(chunks)
         assert body == (new if replace_on == "http.response.start" else old)
         if b"content-length" in headers:
@@ -1703,3 +1716,65 @@ def test_atomic_json_write_preserves_snapshot_on_permission_denial(tmp_path, mon
         write_json(target, {"completed": 3})
     assert json.loads(target.read_text(encoding="utf-8")) == {"completed": 2}
     assert list(tmp_path.iterdir()) == [target]
+
+
+def test_workbench_knowledge_runs_are_scoped_and_score_without_models(monkeypatch, tmp_path, mock_services):
+    endpoint, calls = mock_services
+    cache = tmp_path / "corpora"
+    monkeypatch.setattr(knowledge_data, "CACHE", cache)
+    monkeypatch.setenv("AMB_KNOWLEDGE_CACHE", str(cache))
+    results = tmp_path / "runs"
+    previous_id = "1" * 32
+    previous = results / previous_id
+    previous.mkdir(parents=True)
+    write_json(previous / "run.json", {
+        "id": previous_id, "name": "Memory baseline", "status": "completed", "started_at": "2026-01-01",
+        "selection": {"dataset": "locomo", "split": "locomo10", "backend": "hindsight-http"},
+    })
+
+    api = "/knowledge/api"
+    payload = {
+        "name": "Contracts", "dataset": "legalbench-rag", "split": "mini",
+        "backend": "hindsight-knowledge", "connection": {"api_url": endpoint}, "query_limit": 1,
+    }
+    with TestClient(create_app(results), base_url="http://localhost") as client:
+        config = client.get(f"{api}/config").json()
+        assert set(config["datasets"]) == {
+            "vidore-v3-markdown", "vidore-v3-pdf", "browsecomp-plus", "legalbench-rag", "miracl-vision",
+        }
+        assert set(config["backends"]) == {"hindsight-knowledge"}
+        assert "models" not in config
+        assert "hindsight-knowledge" not in client.get("/api/config").json()["backends"]
+        assert client.post("/api/runs", json=payload).status_code == 422
+        assert client.post(f"{api}/runs", json={**payload, "backend": "hindsight-http"}).status_code == 422
+        assert client.get(f"{api}/runs/{previous_id}").status_code == 404
+        missing = client.post(f"{api}/runs", json=payload)
+        assert missing.status_code == 422
+        assert "prepare-knowledge" in missing.json()["detail"]
+        assert not calls
+
+        split_cache = cache / "legalbench_rag"
+        (split_cache / "corpus").mkdir(parents=True)
+        (split_cache / "corpus/contract.txt").write_text("Terms: delivery by Friday.", encoding="utf-8")
+        (split_cache / "corpus/unrelated.txt").write_text("An extra document.", encoding="utf-8")
+        (split_cache / "benchmarks").mkdir()
+        for dataset in knowledge_data.LEGALBENCH_SETS:
+            write_json(split_cache / f"benchmarks/{dataset}.json", {
+                "tests": [{"query": "When is delivery?", "snippets": [{"file_path": "contract.txt", "span": [19, 25]}]}],
+            })
+        (split_cache / ".complete").touch()
+
+        url, job = await_result(client, client.post(f"{api}/runs", json=payload), api=api)
+        assert job["status"] == "completed", job["log"]
+        assert job["models"] == {}
+        assert job["summary"]["ingested_docs"] == 2
+        assert job["summary"]["total_queries"] == 4  # one query per contract category
+        assert job["summary"]["score_type"] == "recall@5"
+        assert job["summary"]["score"] == 1.0
+        assert job["summary"]["metrics"]["precision@5"] == pytest.approx(6 / 18, abs=1e-4)
+        assert [body["max_tokens"] for path, body in calls if path.endswith("/search")] == [4096] * 4
+        assert client.get(f"{url}/result").json()["mode"] == "retrieval"
+        assert [run["id"] for run in client.get(f"{api}/runs").json()] == [job["id"]]
+        assert [run["id"] for run in client.get("/api/runs").json()] == [previous_id]
+        assert client.get(f"/api/runs/{job['id']}/result").status_code == 404
+        assert client.get(f"/api/runs/{previous_id}").status_code == 200

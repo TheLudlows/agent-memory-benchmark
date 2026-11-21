@@ -55,7 +55,7 @@ One dataset breaks this shape on purpose. **PrecisionMemBench** ([upstream](http
 uv run amb run --dataset precisionmembench --split single-turn --memory hindsight-cloud --mode retrieval
 ```
 
-**Knowledge** datasets (ViDoRe V3 as markdown or PDFs, MIRACL-Vision, video, BrowseComp-Plus, ATM-Bench) are search only too: a corpus goes into a Hindsight knowledge bank and each query's ranking is scored with the leaderboard's own metric, NDCG@10 or Recall@10 (the dataset's `score_type`, which the viewer shows instead of "accuracy"). Corpora are cached in `~/.cache/hindsight/knowledge-evals`; `--query-limit` cuts queries, never the corpus.
+**Knowledge** datasets (ViDoRe V3 as markdown or PDFs, MIRACL-Vision, video, BrowseComp-Plus, ATM-Bench, LegalBench-RAG mini) are search only too: a corpus goes into a Hindsight knowledge bank and each query's ranking is scored with the leaderboard's own metric, nDCG@10, Recall@10 or character Recall@5 (the dataset's `score_type`, which the viewer shows instead of "accuracy"). Corpora are cached in `~/.cache/hindsight/knowledge-evals`; `--query-limit` cuts queries, never the corpus.
 
 ```bash
 HINDSIGHT_KNOWLEDGE_URL=http://localhost:8888 HINDSIGHT_KNOWLEDGE_KEY=... \
@@ -175,6 +175,34 @@ BEAM 有答案的题目如果没有召回内容，以 0 分计入平均分。数
 ContextBase 使用预授权的测试 Bank，并以运行和题目所属的隔离单元标签分开数据。点击「停止评测」会终止当前选中的本地
 评测进程，之前已提交给后端的写入可能仍在处理。并行运行会共享后端资源和模型 API 配额。历史、日志和结果均保存在
 `amb-results/workbench/`（Compose）或 `outputs/workbench/`（直接运行）。
+
+
+#### 知识库检索评测
+
+在顶部选择「知识库检索」进入 `/knowledge`。这页使用 Hindsight 的 Knowledge Bank API，独立保存连接并展示该类运行的历史。记忆评测继续从首页进入。知识库评测不需要回答模型或评分模型，每轮创建一个评测知识库，导入完整语料后执行检索。
+
+| 数据集 | CLI 数据集名 | 分组示例 | 主指标 |
+| --- | --- | --- | --- |
+| ViDoRe V3 Markdown | `vidore-v3-markdown` | `hr` | nDCG@10 |
+| ViDoRe V3 PDF | `vidore-v3-pdf` | `hr` | nDCG@10 |
+| BrowseComp-Plus | `browsecomp-plus` | `evidence` 或 `gold` | nDCG@10 |
+| LegalBench-RAG mini | `legalbench-rag` | `mini` | 字符级 Recall@5 |
+| MIRACL-Vision | `miracl-vision` | `zh` | nDCG@10 |
+
+每个分组首次使用前，在联网环境准备语料。例如：
+
+```bash
+uv run --group workbench amb prepare-knowledge --dataset legalbench-rag --split mini
+```
+
+Docker Compose 使用同一个语料卷准备和运行：
+
+```bash
+docker compose --profile web run --rm amb-web prepare-knowledge --dataset legalbench-rag --split mini
+docker compose --profile web up -d amb-web
+```
+
+语料默认保存在 `~/.cache/hindsight/knowledge-evals`，可通过 `AMB_KNOWLEDGE_CACHE` 指定目录。Workbench 镜像默认使用 `/app/.datasets/knowledge`。断网部署时，复制准备好的缓存并将其挂载到此目录。评测只读取本地语料缓存，仍需能连接配置的 Hindsight 服务。服务须启用 Knowledge Bank，并配置适用于文本、PDF 或图像的模型。首次准备可能需要下载数 GB 数据。修改题数只影响查询，ViDoRe 按语言、LegalBench 按合同类别应用上限。
 
 #### 在华为云 ECS 上启动 Workbench
 

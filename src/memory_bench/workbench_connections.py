@@ -13,7 +13,7 @@ from pydantic import BaseModel, ConfigDict, Field, SecretStr
 from .json_files import write_json
 
 
-BackendId = Literal["contextbase", "mem0-cloud", "hindsight-http"]
+BackendId = Literal["contextbase", "mem0-cloud", "hindsight-http", "hindsight-knowledge"]
 
 
 @dataclass(frozen=True)
@@ -26,6 +26,8 @@ class Backend:
 
 
 BACKENDS: dict[BackendId, Backend] = {
+    "hindsight-knowledge": Backend("Hindsight Knowledge", "HINDSIGHT_KNOWLEDGE_URL", "HINDSIGHT_KNOWLEDGE_KEY",
+                                   "http://127.0.0.1:8888", key_optional=True),
     "contextbase": Backend("ContextBase", "CONTEXTBASE_API_URL", "CONTEXTBASE_API_TOKEN"),
     "mem0-cloud": Backend("Mem0 Cloud", "MEM0_CLOUD_URL", "MEM0_CLOUD_KEY", "https://api.mem0.ai"),
     "hindsight-http": Backend("Hindsight HTTP", "HINDSIGHT_HTTP_URL", "HINDSIGHT_HTTP_KEY",

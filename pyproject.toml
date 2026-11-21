@@ -36,7 +36,7 @@ http-runner = [
     "python-dotenv", "qdrant-client", "rank-bm25", "rich", "scipy", "tiktoken", "typer",
 ]
 
-workbench = ["datasets", "fastapi", "ijson", "mem0ai", "uvicorn"]
+workbench = ["datasets", "fastapi", "ijson", "mem0ai", "pillow", "pypdfium2", "uvicorn"]
 
 [project.scripts]
 amb = "memory_bench.cli:app"

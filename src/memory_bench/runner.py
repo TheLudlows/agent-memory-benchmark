@@ -260,7 +260,7 @@ class EvalRunner:
 
         async def _process_one_attempt(q) -> QueryResult:
             t_start = time.perf_counter()
-            logger.info("[query:%s] start — %s", q.id, q.query[:80])
+            logger.info("[query:%s] start%s", q.id, "" if dataset.redact_query_text else f" — {q.query[:80]}")
             meta = {**q.meta, "_prompt_fn": _prompt_fn}
             rf = dataset.retrieval_filter(q)
             if rf is not None:

@@ -16,6 +16,9 @@ resolution-markers = [
     "python_full_version < '3.12' and sys_platform != 'emscripten' and sys_platform != 'win32'",
 ]
 
+[manifest]
+overrides = [{ name = "uvloop", marker = "sys_platform != 'win32'" }]
+
 [[package]]
 name = "aiofile"
 version = "3.9.0"
@@ -252,6 +255,8 @@ workbench = [
     { name = "fastapi" },
     { name = "ijson" },
     { name = "mem0ai" },
+    { name = "pillow" },
+    { name = "pypdfium2" },
     { name = "uvicorn" },
 ]
 
@@ -299,6 +304,8 @@ workbench = [
     { name = "fastapi" },
     { name = "ijson" },
     { name = "mem0ai" },
+    { name = "pillow" },
+    { name = "pypdfium2" },
     { name = "uvicorn" },
 ]
 
@@ -2113,7 +2120,7 @@ dependencies = [
     { name = "typer" },
     { name = "urllib3" },
     { name = "uvicorn" },
-    { name = "uvloop" },
+    { name = "uvloop", marker = "sys_platform != 'win32'" },
     { name = "wsproto" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/77/25/4691bf18bad83aedc8882d01c6e3e3eac8929e85d18cf868db979754c962/hindsight_api-0.4.15.tar.gz", hash = "sha256:bdc3752aca4cb4e71c49b367b0a8bb2340066f50c0a380b087541172766ba212", size = 389073, upload-time = "2026-03-03T14:04:30.867Z" }
@@ -6400,7 +6407,7 @@ standard = [
     { name = "httptools" },
     { name = "python-dotenv" },
     { name = "pyyaml" },
-    { name = "uvloop", marker = "platform_python_implementation != 'PyPy' and sys_platform != 'cygwin' and sys_platform != 'win32'" },
+    { name = "uvloop", marker = "sys_platform != 'win32'" },
     { name = "watchfiles" },
     { name = "websockets" },
 ]

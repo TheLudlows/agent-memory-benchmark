@@ -11,12 +11,16 @@
   <header class="top">
     <div class="top-inner">
       <div class="brand">Memory Lab</div>
+      <nav aria-label="评测模块">
+        <a id="memory-link" href="/">记忆评测</a>
+        <a id="knowledge-link" href="/knowledge">知识库检索</a>
+      </nav>
     </div>
   </header>
   <main>
     <div class="intro">
-      <h1>记忆评测</h1>
-      <p>发起评测，查看每轮结果，并比较不同方案的得分与耗时。</p>
+      <h1 id="page-title">记忆评测</h1>
+      <p id="page-description">发起评测，查看每轮结果，并比较不同方案的得分与耗时。</p>
     </div>
     <div class="workspace">
       <section class="panel setup">
@@ -28,7 +32,7 @@
           <select id="dataset" name="dataset" required></select>
           <label for="split">数据集分组</label>
           <select id="split" name="split" required></select>
-          <label for="backend">记忆后端</label>
+          <label id="backend-label" for="backend">记忆后端</label>
           <select id="backend" name="backend" required></select>
           <p class="hint" id="backend-help"></p>
           <fieldset id="connection-panel" class="connection-panel" hidden>
@@ -113,6 +117,8 @@
               <div><span>平均检索延迟</span><strong id="retrieval"></strong></div>
               <div><span>检索 P95</span><strong id="retrieval-p95"></strong></div>
               <div><span>写入文档数</span><strong id="ingested-docs"></strong></div>
+              <div id="knowledge-recall" hidden><span>Recall@10</span><strong id="knowledge-recall-value"></strong></div>
+              <div id="knowledge-precision" hidden><span>字符级 Precision@5</span><strong id="knowledge-precision-value"></strong></div>
               <div id="context-token-metric" hidden><span>平均召回上下文 Token</span><strong id="avg-context-tokens"></strong></div>
             </div>
             <figure id="distribution" class="chart" hidden>

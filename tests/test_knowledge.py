@@ -139,13 +139,16 @@ def test_a_run_saves_score_type_per_query_scores_and_rankings(tmp_path):
     assert '"score_type": "ndcg@10"' in head
 
 
-def test_redacted_datasets_keep_query_text_out_of_results(tmp_path):
+def test_redacted_datasets_keep_query_text_out_of_results_and_logs(tmp_path, caplog):
     class Redacted(_StubDataset):
         redact_query_text = True
 
-    EvalRunner(output_dir=tmp_path).run(dataset=Redacted(), split="s", memory=_StubSearch(), mode=RetrievalMode())
+    with caplog.at_level("INFO"):
+        EvalRunner(output_dir=tmp_path).run(dataset=Redacted(), split="s", memory=_StubSearch(), mode=RetrievalMode())
     saved = json.loads((tmp_path / "stub-knowledge" / "stub-search" / "retrieval" / "s.json").read_text())
     assert {r["query"] for r in saved["results"]} == {""}
+    assert "[query:en:1] start" in caplog.text
+    assert "[query:en:1] start —" not in caplog.text
 
 
 def test_every_external_row_names_its_dataset_score_type():

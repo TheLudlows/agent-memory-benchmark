@@ -191,7 +191,9 @@ ContextBase 使用预授权的测试 Bank，并以运行和题目所属的隔离
 | LegalBench-RAG mini | `legalbench-rag` | `mini` | 字符级 Recall@5 |
 | MIRACL-Vision | `miracl-vision` | `zh` | nDCG@10 |
 
-每个分组首次使用前，在联网环境准备语料。例如：
+ViDoRe V3 Markdown 的 `computer_science` 分组随仓库和 Workbench 镜像提供。选中该分组即可离线加载语料和题目。[数据来源与许可](data/offline/vidore-v3-markdown/README.md)
+
+其他分组首次使用前，在联网环境准备语料。例如：
 
 ```bash
 uv run --group workbench amb prepare-knowledge --dataset legalbench-rag --split mini
@@ -204,7 +206,7 @@ docker compose --profile web run --rm amb-web prepare-knowledge --dataset legalb
 docker compose --profile web up -d amb-web
 ```
 
-语料默认保存在 `~/.cache/hindsight/knowledge-evals`，可通过 `AMB_KNOWLEDGE_CACHE` 指定目录。Workbench 镜像默认使用 `/app/.datasets/knowledge`。断网部署时，复制准备好的缓存并将其挂载到此目录。评测只读取本地语料缓存，仍需能连接所选后端，并由后端配置适用于文本、PDF 或图像的模型。Hindsight 服务须启用 Knowledge Bank。首次准备可能需要下载数 GB 数据。修改题数只影响查询，ViDoRe 按语言、LegalBench 按合同类别应用上限。
+语料默认保存在 `~/.cache/hindsight/knowledge-evals`，可通过 `AMB_KNOWLEDGE_CACHE` 指定目录。Workbench 镜像默认使用 `/app/.datasets/knowledge`。断网部署时，复制准备好的缓存并将其挂载到此目录。评测只读取随仓库提供的语料或本地缓存，仍需能连接所选后端，并由后端配置适用于文本、PDF 或图像的模型。Hindsight 服务须启用 Knowledge Bank。首次准备可能需要下载数 GB 数据。修改题数只影响查询，ViDoRe 按语言、LegalBench 按合同类别应用上限。
 
 也可通过 CLI 运行 WeKnora 检索评测。先设置 `WEKNORA_API_URL`、`WEKNORA_API_KEY`、`WEKNORA_EMBEDDING_MODEL_ID`，使用图像语料时设置 `WEKNORA_VLM_MODEL_ID`。
 

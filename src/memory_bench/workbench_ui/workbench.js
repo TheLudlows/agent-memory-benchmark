@@ -131,6 +131,7 @@ function loadConnection() {
   $("connection-panel").hidden = false;
   $("connection-address-row").hidden = addresses.length === 0;
   $("connection-bank-row").hidden = backend !== "contextbase";
+  $("connection-weknora-models").hidden = backend !== "weknora";
   selectConnection();
 }
 
@@ -145,17 +146,25 @@ function selectConnection() {
   $("connection-url").value = "";
   $("connection-bank").placeholder = connection?.has_bank_mapping ? "使用已有 Bank 映射" : "已授权的测试 Bank";
   $("connection-bank").value = connection?.bank_id || "";
+  $("connection-embedding-model").value = connection?.embedding_model_id || "";
+  $("connection-vlm-model").value = connection?.vlm_model_id || "";
   $("connection-key").value = "";
   $("connection-reuse").checked = Boolean(connection?.has_key);
   updateForm();
 }
 
 function connectionInput() {
-  return {
+  const backend = $("backend").value;
+  const connection = {
     api_url: $("connection-address").value || $("connection-url").value.trim(),
-    bank_id: $("backend").value === "contextbase" ? $("connection-bank").value.trim() : "",
+    bank_id: backend === "contextbase" ? $("connection-bank").value.trim() : "",
     api_key: $("connection-key").value.trim() || null,
   };
+  if (backend === "weknora") {
+    connection.embedding_model_id = $("connection-embedding-model").value.trim();
+    connection.vlm_model_id = $("connection-vlm-model").value.trim();
+  }
+  return connection;
 }
 
 function defaultModel(role, provider) {
@@ -310,6 +319,7 @@ function updateForm() {
     "mem0-cloud": "使用 Mem0 Cloud 兼容 API。",
     "hindsight-http": "连接已启动的 Hindsight API。",
     "hindsight-knowledge": "连接已启用知识库的 Hindsight API。每轮创建一个评测知识库。",
+    "weknora": "连接 WeKnora API。每轮创建一个评测知识库。",
   };
   $("backend-help").textContent = descriptions[backend];
   $("connection-reuse-row").hidden = !saved?.has_key;
@@ -318,6 +328,12 @@ function updateForm() {
   const splitError = settings.split_errors?.[$("dataset").value]?.[$("split").value];
   for (const editor of Object.values(modelEditors)) updateModelEditor(editor);
   const dataset = $("dataset").value;
+  const weknora = backend === "weknora";
+  const requiresVlm = weknora && dataset === "miracl-vision";
+  $("connection-embedding-model").required = weknora;
+  $("connection-embedding-model").placeholder = requiresVlm ? "需支持图片向量化" : "";
+  $("connection-vlm-model").required = requiresVlm;
+  $("connection-vlm-model").placeholder = requiresVlm ? "MIRACL-Vision 必填" : "选填";
   const retrieval = retrievalOnly(dataset);
   const roles = choiceOnly(dataset) ? ["answer"] : Object.keys(modelRoles);
   const missing = retrieval ? [] : roles.filter((role) => !settings.models[role].has_key);
@@ -334,11 +350,14 @@ function updateForm() {
     : "限制题数时，仍会写入所选题目对应的会话历史。";
   const ready = $("evaluation-name").value.trim() && connection.api_url &&
     (config.key_optional || connection.api_key || usingSaved) &&
-    (backend !== "contextbase" || connection.bank_id || saved?.has_bank_mapping);
+    (backend !== "contextbase" || connection.bank_id || saved?.has_bank_mapping) &&
+    (!weknora || (connection.embedding_model_id && (!requiresVlm || connection.vlm_model_id)));
   setError("config-error", splitError || modelError);
   for (const id of ["backend", "connection-address", "connection-bank", "connection-key", "connection-reuse"]) {
     $(id).disabled = submitting;
   }
+  $("connection-embedding-model").disabled = submitting || !weknora;
+  $("connection-vlm-model").disabled = submitting || !weknora;
   $("connection-url").disabled = submitting || Boolean(saved);
   const capacityFull = runCapacity && runCapacity.active >= runCapacity.limit;
   const capacityHint = $("run-capacity");
@@ -706,8 +725,12 @@ async function loadDetail(id) {
   }
   const target = job.target;
   $("run-target").hidden = !target?.api_url;
-  $("run-target").textContent = target?.api_url
-    ? `${target.api_url}${target.bank_id ? ` · Bank ${target.bank_id}` : ""}` : "";
+  $("run-target").textContent = target?.api_url ? [
+    target.api_url,
+    target.bank_id && `Bank ${target.bank_id}`,
+    target.embedding_model_id && `Embedding ${target.embedding_model_id}`,
+    target.vlm_model_id && `视觉模型 ${target.vlm_model_id}`,
+  ].filter(Boolean).join(" · ") : "";
   $("status").textContent = statuses[job.status];
   $("status").dataset.status = job.status;
   $("status").hidden = false;
@@ -859,7 +882,7 @@ $("split").addEventListener("change", () => {
 });
 $("backend").addEventListener("change", loadConnection);
 $("connection-address").addEventListener("change", selectConnection);
-for (const id of ["evaluation-name", "connection-url", "connection-bank"]) {
+for (const id of ["evaluation-name", "connection-url", "connection-bank", "connection-embedding-model", "connection-vlm-model"]) {
   $(id).addEventListener("input", updateForm);
 }
 $("connection-key").addEventListener("input", () => {

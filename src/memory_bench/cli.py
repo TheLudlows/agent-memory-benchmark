@@ -79,6 +79,10 @@ def run(
                 "ContextBase supports LoCoMo, BEAM, LongMemEval and LifeBench 1.0 / 2.0 in rag mode, "
                 "and PrecisionMemBench in retrieval mode.", param_hint="--memory",
             )
+    if memory == "weknora" and (dataset not in WORKBENCH_KNOWLEDGE_DATASETS or mode != "retrieval"):
+        raise typer.BadParameter(
+            "WeKnora supports Workbench knowledge datasets in retrieval mode.", param_hint="--memory",
+        )
     no_llm = mode == "retrieval"  # search only: no answer model, no judge, no LLM key needed
     if not no_llm:
         _resolve_gemini_key()

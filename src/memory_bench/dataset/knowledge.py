@@ -2,7 +2,7 @@
 the ranking a search returns. Search only, no answer LLM and no judge.
 
 Run with ``--mode retrieval`` against a provider that writes files and text into a knowledge
-bank (``hindsight-knowledge``):
+bank (for example, ``hindsight-knowledge`` or ``weknora``):
 
 | dataset                | splits                         | score (``score_type``)        |
 |------------------------|--------------------------------|-------------------------------|
@@ -349,9 +349,12 @@ class LegalBenchRagDataset(KnowledgeDataset):
         found: dict[str, list[tuple[int, int]]] = {}
         returned = unplaced = 0
         for hit in retrieved[: self.TOP]:
-            spans = text_spans(texts.get(hit.id, ""), hit.content or "")
-            returned += sum(e - s for s, e in spans)
-            unplaced += max(0, len((hit.content or "").replace("\n\n", "")) - sum(e - s for s, e in spans))
+            content = hit.content or ""
+            spans = hit.spans if hit.spans is not None else text_spans(texts.get(hit.id, ""), content)
+            placed = sum(end - start for start, end in spans)
+            returned += placed
+            if hit.spans is None:
+                unplaced += max(0, len(content.replace("\n\n", "")) - placed)
             found.setdefault(hit.id, []).extend(spans)
         found = {d: _merged(s) for d, s in found.items()}
         marked = sum(end - start for spans in gold.values() for start, end in _merged(spans))

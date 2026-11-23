@@ -53,7 +53,7 @@ DATASETS = {
     "precisionmembench": PRECISIONMEMBENCH_SPLITS,
 }
 KNOWLEDGE_SPLITS = {name: cls.splits for name, cls in WORKBENCH_KNOWLEDGE_DATASETS.items()}
-KNOWLEDGE_BACKEND = "hindsight-knowledge"
+KNOWLEDGE_BACKENDS: tuple[BackendId, ...] = ("hindsight-knowledge", "weknora")
 RETRIEVAL_DATASETS = {"precisionmembench"}
 CHOICE_DATASETS = {"personamem"}
 QUESTION_TYPE_FIELDS = {
@@ -102,7 +102,7 @@ class RunSelection(BaseModel):
         datasets = KNOWLEDGE_SPLITS if self.is_knowledge else DATASETS
         if self.split not in datasets.get(self.dataset, ()):
             raise ValueError(f"Split {self.split!r} is unavailable for {self.dataset}.")
-        if self.is_knowledge != (self.backend == KNOWLEDGE_BACKEND):
+        if self.is_knowledge != (self.backend in KNOWLEDGE_BACKENDS):
             raise ValueError("请选择此评测类型支持的后端。")
         return self
 
@@ -187,7 +187,9 @@ class RunManager:
                     409, f"已达到同时运行 {self.max_concurrent_runs} 轮评测的上限。请等待一轮结束后再启动。",
                 )
             try:
-                connection = self.connections.for_run(selection.backend, selection.connection)
+                connection = self.connections.for_run(
+                    selection.backend, selection.connection, requires_vlm=selection.dataset == "miracl-vision",
+                )
                 models, model_env = {}, {}
                 if selection.mode == "rag":
                     models, model_env = self.models.for_run(selection.dataset, needs_judge=selection.dataset not in CHOICE_DATASETS)
@@ -200,11 +202,14 @@ class RunManager:
             run_id = uuid4().hex
             directory = self.root / run_id
             directory.mkdir(mode=0o700)
+            target = {"api_url": connection.api_url, "bank_id": connection.bank_id}
+            if selection.backend == "weknora":
+                target.update(embedding_model_id=connection.embedding_model_id, vlm_model_id=connection.vlm_model_id)
             job = {
                 "id": run_id,
                 "name": selection.name,
                 "selection": selection.model_dump(exclude={"name", "connection"}),
-                "target": {"api_url": connection.api_url, "bank_id": connection.bank_id},
+                "target": target,
                 "models": models,
                 "status": "running",
                 "started_at": _now(),
@@ -460,7 +465,7 @@ def create_app(output_dir: Path) -> FastAPI:
                     name: {split: error for split in splits if (error := _dataset_error(name, split))}
                     for name, splits in KNOWLEDGE_SPLITS.items()
                 },
-                "backends": {KNOWLEDGE_BACKEND: backends[KNOWLEDGE_BACKEND]},
+                "backends": {key: backends[key] for key in KNOWLEDGE_BACKENDS},
             }
         return {
             "datasets": DATASETS,
@@ -469,7 +474,7 @@ def create_app(output_dir: Path) -> FastAPI:
             "split_errors": {"beam": {
                 split: error for split in BEAM_SPLITS if (error := _dataset_error("beam", split))
             }},
-            "backends": {key: backends[key] for key in backends if key != KNOWLEDGE_BACKEND},
+            "backends": {key: backends[key] for key in backends if key not in KNOWLEDGE_BACKENDS},
             "models": manager.models.public(),
             "model_services": manager.models.services(),
             "beam_default_judge_model": DEFAULT_JUDGE_MODEL,

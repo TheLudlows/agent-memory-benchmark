@@ -14,6 +14,7 @@ from .ogham import OghamMemoryProvider
 from .supermemory import SupermemoryMemoryProvider
 from .none import NoMemoryProvider
 from .hscoding import HsCodingProvider
+from .weknora import WeKnoraMemoryProvider
 
 REGISTRY: dict[str, type[MemoryProvider]] = {
     "vanilla": NoMemoryProvider,
@@ -25,6 +26,7 @@ REGISTRY: dict[str, type[MemoryProvider]] = {
     "hindsight-cloud": HindsightCloudMemoryProvider,
     "hindsight-http": HindsightHTTPMemoryProvider,
     "hindsight-knowledge": HindsightKnowledgeMemoryProvider,
+    "weknora": WeKnoraMemoryProvider,
     "hindsight-support-memory": HindsightSupportMemoryProvider,
     "hindsight-support-knowledge": HindsightSupportKnowledgeProvider,
     "hindsight-support-linked": HindsightSupportLinkedProvider,

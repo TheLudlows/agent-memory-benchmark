@@ -67,6 +67,8 @@ def run(directory: Path) -> int:
     def record_documents(documents: Iterable[Document]) -> None:
         for document in documents:
             fields = asdict(document)
+            # Exclude retrieval-only offsets to preserve existing corpus fingerprints.
+            fields.pop("spans")
             if document.path:
                 with Path(document.path).open("rb") as source:
                     fields["path"] = file_digest(source, "sha256").hexdigest()

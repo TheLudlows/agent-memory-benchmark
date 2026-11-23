@@ -14,6 +14,7 @@ class Document:
     path: str | None = None              # on ingest: a file to upload as this document (PDF, image, video) instead of content
     filename: str | None = None          # on ingest: the name the document is stored under (knowledge banks read it as the title)
     page: int | None = None              # on retrieval: the 1-based page of a multi-page document the hit came from
+    spans: list[tuple[int, int]] | None = None  # on retrieval: exact half-open character ranges in the source text
 
 
 @dataclass

@@ -1742,7 +1742,7 @@ def test_workbench_knowledge_runs_are_scoped_and_score_without_models(monkeypatc
         assert set(config["datasets"]) == {
             "vidore-v3-markdown", "vidore-v3-pdf", "browsecomp-plus", "legalbench-rag", "miracl-vision",
         }
-        assert set(config["backends"]) == {"hindsight-knowledge"}
+        assert set(config["backends"]) == {"hindsight-knowledge", "weknora"}
         assert "models" not in config
         assert "hindsight-knowledge" not in client.get("/api/config").json()["backends"]
         assert client.post("/api/runs", json=payload).status_code == 422
@@ -1778,3 +1778,66 @@ def test_workbench_knowledge_runs_are_scoped_and_score_without_models(monkeypatc
         assert [run["id"] for run in client.get("/api/runs").json()] == [previous_id]
         assert client.get(f"/api/runs/{job['id']}/result").status_code == 404
         assert client.get(f"/api/runs/{previous_id}").status_code == 200
+
+
+def test_workbench_weknora_connections_and_model_requirements(monkeypatch, tmp_path):
+    endpoint = "https://weknora.example"
+    key = "weknora-private-key"
+    monkeypatch.setenv("WEKNORA_API_URL", endpoint)
+    monkeypatch.setenv("WEKNORA_API_KEY", key)
+    monkeypatch.setenv("WEKNORA_EMBEDDING_MODEL_ID", "embedding-id")
+    monkeypatch.delenv("WEKNORA_VLM_MODEL_ID", raising=False)
+    monkeypatch.setattr("memory_bench.workbench._dataset_error", lambda *_: None)
+
+    environments = []
+
+    def launch(*_, env, **__):
+        environments.append(env)
+        return SimpleNamespace(stdout=io.StringIO(), wait=lambda timeout=None: 0, poll=lambda: 0)
+
+    monkeypatch.setattr("memory_bench.workbench.subprocess.Popen", launch)
+    results = tmp_path / "runs"
+    api = "/knowledge/api"
+    saved_connection = {"api_url": endpoint, "use_saved_key": True}
+    payload = {
+        "name": "WeKnora run", "dataset": "miracl-vision", "split": "zh", "backend": "weknora",
+        "connection": saved_connection,
+    }
+    with TestClient(create_app(results), base_url="http://localhost") as client:
+        config = client.get(f"{api}/config")
+        weknora = config.json()["backends"]["weknora"]
+        assert weknora["api_url"] == endpoint
+        assert weknora["embedding_model_id"] == "embedding-id"
+        assert weknora["has_key"] and key not in config.text
+        assert "weknora" not in client.get("/api/config").json()["backends"]
+        assert client.post("/api/runs", json=payload).status_code == 422
+        memory = {**payload, "dataset": "locomo", "split": "locomo10"}
+        assert client.post("/api/runs", json=memory).status_code == 422
+
+        missing = client.post(f"{api}/runs", json=payload)
+        assert missing.status_code == 422
+        assert "视觉模型 ID" in missing.json()["detail"]
+        other_connection = {"api_url": "https://other-weknora.example", "api_key": "other-key"}
+        text = {**payload, "dataset": "legalbench-rag", "split": "mini"}
+        missing = client.post(f"{api}/runs", json={**text, "connection": other_connection})
+        assert missing.status_code == 422
+        assert "Embedding 模型 ID" in missing.json()["detail"]
+        assert not environments
+
+        connection = {**saved_connection, "vlm_model_id": "vision-id"}
+        response = client.post(f"{api}/runs", json={**payload, "connection": connection})
+        _, job = await_result(client, response, api=api)
+        assert job["status"] == "completed"
+        assert job["models"] == {}
+        assert job["target"] == {
+            "api_url": endpoint, "bank_id": "", "embedding_model_id": "embedding-id", "vlm_model_id": "vision-id",
+        }
+        assert environments[0]["WEKNORA_API_KEY"] == key
+        assert environments[0]["WEKNORA_EMBEDDING_MODEL_ID"] == "embedding-id"
+        assert environments[0]["WEKNORA_VLM_MODEL_ID"] == "vision-id"
+        assert key not in response.text and key not in client.get(f"{api}/runs").text
+
+    with TestClient(create_app(results), base_url="http://localhost") as client:
+        weknora = client.get(f"{api}/config").json()["backends"]["weknora"]
+        assert weknora["saved"] and weknora["vlm_model_id"] == "vision-id"
+        assert [item["selection"]["backend"] for item in client.get(f"{api}/runs").json()] == ["weknora"]

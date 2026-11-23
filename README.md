@@ -55,7 +55,7 @@ One dataset breaks this shape on purpose. **PrecisionMemBench** ([upstream](http
 uv run amb run --dataset precisionmembench --split single-turn --memory hindsight-cloud --mode retrieval
 ```
 
-**Knowledge** datasets (ViDoRe V3 as markdown or PDFs, MIRACL-Vision, video, BrowseComp-Plus, ATM-Bench, LegalBench-RAG mini) are search only too: a corpus goes into a Hindsight knowledge bank and each query's ranking is scored with the leaderboard's own metric, nDCG@10, Recall@10 or character Recall@5 (the dataset's `score_type`, which the viewer shows instead of "accuracy"). Corpora are cached in `~/.cache/hindsight/knowledge-evals`; `--query-limit` cuts queries, never the corpus.
+**Knowledge** datasets (ViDoRe V3 as markdown or PDFs, MIRACL-Vision, video, BrowseComp-Plus, ATM-Bench, LegalBench-RAG mini) are search only too: a corpus goes into a knowledge base and each query's ranking is scored with the leaderboard's own metric, nDCG@10, Recall@10 or character Recall@5 (the dataset's `score_type`, which the viewer shows instead of "accuracy"). Corpora are cached in `~/.cache/hindsight/knowledge-evals`; `--query-limit` cuts queries, never the corpus.
 
 ```bash
 HINDSIGHT_KNOWLEDGE_URL=http://localhost:8888 HINDSIGHT_KNOWLEDGE_KEY=... \
@@ -179,7 +179,9 @@ ContextBase 使用预授权的测试 Bank，并以运行和题目所属的隔离
 
 #### 知识库检索评测
 
-在顶部选择「知识库检索」进入 `/knowledge`。这页使用 Hindsight 的 Knowledge Bank API，独立保存连接并展示该类运行的历史。记忆评测继续从首页进入。知识库评测不需要回答模型或评分模型，每轮创建一个评测知识库，导入完整语料后执行检索。
+在顶部选择「知识库检索」进入 `/knowledge`，可选 Hindsight Knowledge 或 WeKnora。这页独立保存连接和知识库评测历史，记忆评测仍从首页进入。每轮创建一个评测知识库，导入完整语料，等待索引完成后执行检索。评测不需要回答模型或评分模型。
+
+选择 WeKnora 后，填写服务地址、API Key 和该 WeKnora 服务中的 Embedding Model ID。MIRACL-Vision 需要支持图像输入的 Embedding 模型和支持图像识别的 VLM Model ID。ViDoRe PDF 可选填 VLM Model ID。API Key 需要创建知识库、写入文档和检索的权限（`manage_kbs`、`ingest`、`retrieve`），并能访问本轮创建的知识库。ViDoRe PDF 需要 WeKnora 检索接口返回 PDF 页码来源。
 
 | 数据集 | CLI 数据集名 | 分组示例 | 主指标 |
 | --- | --- | --- | --- |
@@ -202,7 +204,14 @@ docker compose --profile web run --rm amb-web prepare-knowledge --dataset legalb
 docker compose --profile web up -d amb-web
 ```
 
-语料默认保存在 `~/.cache/hindsight/knowledge-evals`，可通过 `AMB_KNOWLEDGE_CACHE` 指定目录。Workbench 镜像默认使用 `/app/.datasets/knowledge`。断网部署时，复制准备好的缓存并将其挂载到此目录。评测只读取本地语料缓存，仍需能连接配置的 Hindsight 服务。服务须启用 Knowledge Bank，并配置适用于文本、PDF 或图像的模型。首次准备可能需要下载数 GB 数据。修改题数只影响查询，ViDoRe 按语言、LegalBench 按合同类别应用上限。
+语料默认保存在 `~/.cache/hindsight/knowledge-evals`，可通过 `AMB_KNOWLEDGE_CACHE` 指定目录。Workbench 镜像默认使用 `/app/.datasets/knowledge`。断网部署时，复制准备好的缓存并将其挂载到此目录。评测只读取本地语料缓存，仍需能连接所选后端，并由后端配置适用于文本、PDF 或图像的模型。Hindsight 服务须启用 Knowledge Bank。首次准备可能需要下载数 GB 数据。修改题数只影响查询，ViDoRe 按语言、LegalBench 按合同类别应用上限。
+
+也可通过 CLI 运行 WeKnora 检索评测。先设置 `WEKNORA_API_URL`、`WEKNORA_API_KEY`、`WEKNORA_EMBEDDING_MODEL_ID`，使用图像语料时设置 `WEKNORA_VLM_MODEL_ID`。
+
+```bash
+uv run --group workbench amb run --dataset legalbench-rag --split mini \
+  --memory weknora --mode retrieval --query-limit 5
+```
 
 #### 在华为云 ECS 上启动 Workbench
 

@@ -11,6 +11,7 @@ from memory_bench.dataset import knowledge_data as data
 from memory_bench.dataset.knowledge import (
     AtmBenchRetrievalDataset,
     KnowledgeDataset,
+    LegalBenchRagDataset,
     VidorePdfDataset,
     ndcg_at_k,
     ranked_documents,
@@ -95,6 +96,24 @@ def test_score_retrieval_returns_the_headline_metric_and_records_the_ranking():
     assert q.meta["ranking"] == ["d1", "p2"]
     assert q.meta["metrics"]["recall@1"] == 0.0 and q.meta["metrics"]["recall@10"] == 1.0
     assert "rank 2" in reason
+
+
+def test_legalbench_uses_source_offsets_for_repeated_text():
+    ds = LegalBenchRagDataset()
+    ds.__dict__["_suites"] = {
+        "mini": data.RankedSuite(
+            name="legal",
+            items=(data.TextItem(id="contract", text="条款 ABC / 条款 ABC", filename="contract.txt"),),
+            queries=(data.RankedQuery(id="q", text="q", group="nda", relevant={"contract": 1}),),
+            spans={"q": [("contract", 9, 15)]},
+        ),
+    }
+    query = ds.load_queries("mini")[0]
+    wrong_occurrence = Document(id="contract", content="条款 ABC", spans=[(0, 6)])
+    right_occurrence = Document(id="contract", content="条款 ABC", spans=[(9, 15)])
+
+    assert ds.score_retrieval(query, [wrong_occurrence])[2] == 0.0
+    assert ds.score_retrieval(query, [right_occurrence])[2] == 1.0
 
 
 def test_atm_bench_scores_recall_at_10():

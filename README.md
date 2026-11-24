@@ -179,7 +179,9 @@ ContextBase 使用预授权的测试 Bank，并以运行和题目所属的隔离
 
 #### 知识库检索评测
 
-在顶部选择「知识库检索」进入 `/knowledge`，可选 Hindsight Knowledge 或 WeKnora。这页独立保存连接和知识库评测历史，记忆评测仍从首页进入。每轮创建一个评测知识库，导入完整语料，等待索引完成后执行检索。评测不需要回答模型或评分模型。
+在顶部选择「知识库检索」进入 `/knowledge`。这页独立保存连接和知识库评测历史，记忆评测仍从首页进入。每轮导入完整语料，等待写入完成后执行检索。AMB 无需配置回答模型或评分模型。
+
+Hindsight Knowledge 和 WeKnora 每轮创建一个评测知识库。**ContextBase** 支持 ViDoRe V3 Markdown 和 BrowseComp-Plus。选择其中一个数据集后，填写 ContextBase API 地址、业务 API Key 和已授权读写的测试 Bank ID。AMB 在该 Bank 内用独立标签隔离每轮语料，通过 Retain 写入，并按 Recall 返回的来源文档 ID 评分。评测数据会保留在 Bank 中。结果反映该 Bank 的 Retain 配置和 Recall 排序。要评测原文分块检索，可由管理员把测试 Bank 的提取模式设为 `chunks`。
 
 选择 WeKnora 后，填写服务地址、API Key 和该 WeKnora 服务中的 Embedding Model ID。MIRACL-Vision 需要支持图像输入的 Embedding 模型和支持图像识别的 VLM Model ID。ViDoRe PDF 可选填 VLM Model ID。API Key 需要创建知识库、写入文档和检索的权限（`manage_kbs`、`ingest`、`retrieve`），并能访问本轮创建的知识库。ViDoRe PDF 需要 WeKnora 检索接口返回 PDF 页码来源。
 
@@ -207,6 +209,12 @@ docker compose --profile web up -d amb-web
 ```
 
 语料默认保存在 `~/.cache/hindsight/knowledge-evals`，可通过 `AMB_KNOWLEDGE_CACHE` 指定目录。Workbench 镜像默认使用 `/app/.datasets/knowledge`。断网部署时，复制准备好的缓存并将其挂载到此目录。评测只读取随仓库提供的语料或本地缓存，仍需能连接所选后端，并由后端配置适用于文本、PDF 或图像的模型。Hindsight 服务须启用 Knowledge Bank。首次准备可能需要下载数 GB 数据。修改题数只影响查询，ViDoRe 按语言、LegalBench 按合同类别应用上限。
+
+也可通过 CLI 运行 ContextBase 检索评测。先配置 `CONTEXTBASE_API_URL`、`CONTEXTBASE_API_TOKEN` 和 `CONTEXTBASE_BANK_ID`，再运行：
+
+```bash
+uv run --group workbench amb run --dataset vidore-v3-markdown --split computer_science --memory contextbase-knowledge --mode retrieval --query-limit 5
+```
 
 也可通过 CLI 运行 WeKnora 检索评测。先设置 `WEKNORA_API_URL`、`WEKNORA_API_KEY`、`WEKNORA_EMBEDDING_MODEL_ID`，使用图像语料时设置 `WEKNORA_VLM_MODEL_ID`。
 

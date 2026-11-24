@@ -95,7 +95,18 @@ function options(id, values) {
 
 function updateSplits() {
   options("split", settings.datasets[$("dataset").value].map((item) => [item, item]));
-  updateForm();
+  const backend = $("backend").value;
+  const choices = Object.entries(settings.backends).filter(([key]) => {
+    const datasets = settings.backend_datasets?.[key];
+    return !datasets || datasets.includes($("dataset").value);
+  });
+  options("backend", choices.map(([key, value]) => [key, value.label]));
+  if (choices.some(([key]) => key === backend)) {
+    $("backend").value = backend;
+    updateForm();
+  } else {
+    loadConnection();
+  }
   updateQuestionCount();
 }
 
@@ -130,7 +141,7 @@ function loadConnection() {
   options("connection-address", [...addresses, ["", "输入新地址"]]);
   $("connection-panel").hidden = false;
   $("connection-address-row").hidden = addresses.length === 0;
-  $("connection-bank-row").hidden = backend !== "contextbase";
+  $("connection-bank-row").hidden = !backend.startsWith("contextbase");
   $("connection-weknora-models").hidden = backend !== "weknora";
   selectConnection();
 }
@@ -157,7 +168,7 @@ function connectionInput() {
   const backend = $("backend").value;
   const connection = {
     api_url: $("connection-address").value || $("connection-url").value.trim(),
-    bank_id: backend === "contextbase" ? $("connection-bank").value.trim() : "",
+    bank_id: backend.startsWith("contextbase") ? $("connection-bank").value.trim() : "",
     api_key: $("connection-key").value.trim() || null,
   };
   if (backend === "weknora") {
@@ -316,6 +327,7 @@ function updateForm() {
   const saved = selectedConnection();
   const descriptions = {
     "contextbase": "使用预先授权的测试 Bank。",
+    "contextbase-knowledge": "使用有读写权限的测试 Bank，按原始文档来源评分。",
     "mem0-cloud": "使用 Mem0 Cloud 兼容 API。",
     "hindsight-http": "连接已启动的 Hindsight API。",
     "hindsight-knowledge": "连接已启用知识库的 Hindsight API。每轮创建一个评测知识库。",
@@ -350,7 +362,8 @@ function updateForm() {
     : "限制题数时，仍会写入所选题目对应的会话历史。";
   const ready = $("evaluation-name").value.trim() && connection.api_url &&
     (config.key_optional || connection.api_key || usingSaved) &&
-    (backend !== "contextbase" || connection.bank_id || saved?.has_bank_mapping) &&
+    (!backend.startsWith("contextbase") || connection.bank_id ||
+      (backend === "contextbase" && saved?.has_bank_mapping)) &&
     (!weknora || (connection.embedding_model_id && (!requiresVlm || connection.vlm_model_id)));
   setError("config-error", splitError || modelError);
   for (const id of ["backend", "connection-address", "connection-bank", "connection-key", "connection-reuse"]) {
@@ -920,14 +933,11 @@ async function init() {
   try {
     settings = await api("/config");
     options("dataset", Object.keys(settings.datasets).map((key) => [key, names[key]]));
-    options("backend", Object.entries(settings.backends).map(([key, value]) => [key, value.label]));
-    options("split", settings.datasets[$("dataset").value].map((item) => [item, item]));
     if (!knowledge) {
       for (const role of Object.keys(modelRoles)) createModelEditor(role);
       $("model-settings").hidden = false;
     }
-    loadConnection();
-    updateQuestionCount();
+    updateSplits();
     await poll();
   } catch (error) {
     setError("form-error", error.message);

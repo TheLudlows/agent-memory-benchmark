@@ -2,6 +2,7 @@ import json
 import os
 import re
 import time
+from dataclasses import replace
 from hashlib import sha256
 from pathlib import Path
 from urllib.parse import quote
@@ -10,7 +11,7 @@ from uuid import uuid4
 import httpx
 
 from ..models import Document
-from .base import MemoryProvider
+from .base import MemoryProvider, RetrievalError
 from .hindsight import _as_recall_response, _build_docs, _deduplicate_results
 
 
@@ -20,17 +21,19 @@ class ContextBaseMemoryProvider(MemoryProvider):
     kind = "cloud"
     supports_incremental_ingest = True
 
-    def __init__(self) -> None:
+    def __init__(self, *, single_bank: bool = False) -> None:
         url = os.environ.get("CONTEXTBASE_API_URL", "").strip()
         token = os.environ.get("CONTEXTBASE_API_TOKEN", "").strip()
         if not url or not token:
             raise ValueError("Set CONTEXTBASE_API_URL and CONTEXTBASE_API_TOKEN for ContextBase.")
         self._bank_id = os.environ.get("CONTEXTBASE_BANK_ID", "").strip()
-        self._bank_map = json.loads(os.environ.get("CONTEXTBASE_BENCH_BANKS") or "{}")
+        self._bank_map = {} if single_bank else json.loads(os.environ.get("CONTEXTBASE_BENCH_BANKS") or "{}")
         if not isinstance(self._bank_map, dict) or not all(
             isinstance(bank, str) and bank.strip() for bank in self._bank_map.values()
         ):
             raise ValueError("CONTEXTBASE_BENCH_BANKS must map isolation unit IDs to Bank IDs.")
+        if single_bank and not self._bank_id:
+            raise ValueError("Set CONTEXTBASE_BANK_ID for ContextBase knowledge retrieval.")
         if bool(self._bank_id) == bool(self._bank_map):
             raise ValueError("Set either CONTEXTBASE_BANK_ID or CONTEXTBASE_BENCH_BANKS.")
 
@@ -83,6 +86,9 @@ class ContextBaseMemoryProvider(MemoryProvider):
         response.raise_for_status()
         return response.json()
 
+    def _retained_id(self, document_id: str) -> str:
+        return f"amb-{self.ingestion_run_id}-{document_id}"
+
     def _items_by_unit(self, documents: list[Document]) -> dict[str, list[dict]]:
         items_by_unit: dict[str, list[dict]] = {}
         for doc in documents:
@@ -92,7 +98,7 @@ class ContextBaseMemoryProvider(MemoryProvider):
             _, tags = self._scope(unit_id)
             item = {
                 "content": doc.content.replace("\x00", ""),
-                "document_id": f"amb-{self.ingestion_run_id}-{doc.id}",
+                "document_id": self._retained_id(doc.id),
                 "metadata": {"doc_id": doc.id},
                 "tags": tags,
                 "update_mode": "replace",
@@ -277,3 +283,67 @@ class ContextBaseMemoryProvider(MemoryProvider):
             if doc.source_ids:
                 doc.source_ids = list(dict.fromkeys(source.removeprefix(prefix) for source in doc.source_ids))
         return docs, raw
+
+
+class ContextBaseKnowledgeProvider(ContextBaseMemoryProvider):
+    """Rank benchmark source documents using scoped ContextBase Recall."""
+
+    name = "contextbase-knowledge"
+    description = "ContextBase Retain and Recall over a tagged text corpus, scored by source document."
+    provider = "contextbase"
+    variant = "knowledge"
+    supports_incremental_ingest = False
+    supported_datasets = ("vidore-v3-markdown", "browsecomp-plus")
+    _unit = "knowledge"
+
+    def __init__(self) -> None:
+        super().__init__(single_bank=True)
+        self._source_ids: dict[str, str] = {}
+
+    def prepare(self, store_dir: Path, unit_ids: set[str] | None = None, reset: bool = True) -> None:
+        self._source_ids.clear()
+        super().prepare(store_dir, {self._unit}, reset=reset)
+
+    def _items_by_unit(self, documents: list[Document]) -> dict[str, list[dict]]:
+        if not documents or any(doc.path or not doc.content.replace("\x00", "").strip() for doc in documents):
+            raise ValueError("ContextBase knowledge retrieval needs a nonempty text corpus.")
+        if len({doc.id for doc in documents}) != len(documents):
+            raise ValueError("ContextBase knowledge retrieval needs unique source document IDs.")
+        return super()._items_by_unit([replace(doc, user_id=self._unit) for doc in documents])
+
+    def ingest(self, documents: list[Document]) -> None:
+        self._source_ids.clear()
+        super().ingest(documents)
+        self._source_ids = {self._retained_id(doc.id): doc.id for doc in documents}
+
+    def validate_ingestion(self, documents: list[Document]) -> None:
+        self._source_ids.clear()
+        super().validate_ingestion(documents)
+        self._source_ids = {self._retained_id(doc.id): doc.id for doc in documents}
+
+    def retrieve(self, query: str, k: int = 10, user_id: str | None = None,
+                 query_timestamp: str | None = None) -> tuple[list[Document], dict]:
+        if not self._source_ids:
+            raise RetrievalError("ContextBase has no completed benchmark ingest.")
+        path, tags = self._scope(self._unit)
+        raw = self._request("POST", f"{path}/memories/recall", json={
+            "query": query[:1900], "budget": "high", "max_tokens": self._max_tokens,
+            "include": {"entities": None}, "types": ["world", "experience"],
+            "tags": tags, "tags_match": "all_strict",
+        })
+        results = raw.get("results")
+        if not isinstance(results, list):
+            raise RetrievalError("ContextBase Recall did not return a result list.")
+
+        ranked = {}
+        for result in results:
+            source = result.get("document_id") if isinstance(result, dict) else None
+            if not isinstance(source, str) or source not in self._source_ids:
+                raise RetrievalError("ContextBase Recall returned a hit without a known benchmark source document.")
+            doc_id = self._source_ids[source]
+            text = result.get("text")
+            if not isinstance(text, str):
+                raise RetrievalError("ContextBase Recall returned an invalid hit text.")
+            if doc_id not in ranked:
+                ranked[doc_id] = Document(id=doc_id, content=text, source_ids=[doc_id])
+        return list(ranked.values())[:k], raw

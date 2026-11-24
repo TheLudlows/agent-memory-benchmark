@@ -193,18 +193,18 @@ Hindsight Knowledge 和 WeKnora 每轮创建一个评测知识库。**ContextBas
 | LegalBench-RAG mini | `legalbench-rag` | `mini` | 字符级 Recall@5 |
 | MIRACL-Vision | `miracl-vision` | `zh` | nDCG@10 |
 
-ViDoRe V3 Markdown 的 `computer_science` 分组随仓库和 Workbench 镜像提供。选中该分组即可离线加载语料和题目。[数据来源与许可](data/offline/vidore-v3-markdown/README.md)
+ViDoRe V3 Markdown 的 `computer_science` 和 LegalBench-RAG 的 `mini` 随仓库和 Workbench 镜像提供，可直接离线加载语料和题目。LegalBench-RAG mini 包含 714 份法律文档和 776 道题。[ViDoRe 来源与许可](data/offline/vidore-v3-markdown/README.md) · [LegalBench-RAG 来源与许可](data/offline/legalbench-rag/README.md)
 
 其他分组首次使用前，在联网环境准备语料。例如：
 
 ```bash
-uv run --group workbench amb prepare-knowledge --dataset legalbench-rag --split mini
+uv run --group workbench amb prepare-knowledge --dataset vidore-v3-markdown --split hr
 ```
 
 Docker Compose 使用同一个语料卷准备和运行：
 
 ```bash
-docker compose --profile web run --rm amb-web prepare-knowledge --dataset legalbench-rag --split mini
+docker compose --profile web run --rm amb-web prepare-knowledge --dataset vidore-v3-markdown --split hr
 docker compose --profile web up -d amb-web
 ```
 

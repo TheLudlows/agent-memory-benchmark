@@ -1,9 +1,8 @@
 """The corpora the knowledge-bank suites write into a bank, downloaded once into a cache.
 
-Nothing here is committed: every dataset is public, several are gigabytes, and each is
-read from the repository bundle or fetched on first use into ``$AMB_KNOWLEDGE_CACHE`` (default
-``~/.cache/hindsight/knowledge-evals``, the cache Hindsight's own evals use), outside the repo. A ``.complete`` marker per
-dataset makes a half-finished download start over instead of scoring a partial corpus.
+Some corpora are bundled in the repository. Others are fetched on first use into
+``$AMB_KNOWLEDGE_CACHE`` (default ``~/.cache/hindsight/knowledge-evals``). A ``.complete``
+marker makes a half-finished download start over instead of scoring a partial corpus.
 
 Every loader returns the full corpus a leaderboard number was measured on, and narrows only
 the QUERIES for a default run: a smaller corpus would make every query easier, and the
@@ -123,6 +122,12 @@ def _vidore_markdown_bundle(task: str) -> Path:
     return data_path("offline", "vidore-v3-markdown", f"{task}.json.xz")
 
 
+def _legalbench_mini_path() -> Path:
+    cache = CACHE / "legalbench_rag" / ".complete"
+    bundle = data_path("offline", "legalbench-rag", "mini.json.xz")
+    return bundle if not cache.is_file() and bundle.is_file() else cache
+
+
 def workbench_cache_files(dataset: str, split: str) -> tuple[Path, ...]:
     if dataset == "vidore-v3-markdown":
         bundle = _vidore_markdown_bundle(split)
@@ -138,7 +143,7 @@ def workbench_cache_files(dataset: str, split: str) -> tuple[Path, ...]:
         base = CACHE / "browsecomp_plus"
         return (base / ".complete", base / BROWSECOMP_QREL_FILES[split])
     if dataset == "legalbench-rag":
-        return (CACHE / "legalbench_rag" / ".complete",)
+        return (_legalbench_mini_path(),)
     raise ValueError(f"Unknown Workbench knowledge dataset: {dataset}")
 
 
@@ -640,13 +645,8 @@ LEGALBENCH_SETS = ("privacy_qa", "contractnli", "maud", "cuad")
 LEGALBENCH_MINI_PER_SET = 194
 
 
-def legalbench_rag(*, queries: int | None) -> RankedSuite:
-    """LegalBench-RAG mini: the 776 questions the repository's benchmark.py picks (194 per set, its
-    seeded order), over the whole 714-contract corpus of the four sets, as Conare's table runs it.
-
-    Documents go in under neutral ids and file names (``lb-0001.txt``), as Conare ran it ("no file
-    names"): the corpus paths name the parties, which the questions were written from.
-    """
+def _legalbench_cached() -> tuple[tuple[TextItem, ...], dict[str, list]]:
+    """Load the original archive layout from an installation's knowledge cache."""
     import random
     import zipfile
 
@@ -668,24 +668,42 @@ def legalbench_rag(*, queries: int | None) -> RankedSuite:
         )
         for p in paths
     )
-    tests: list[tuple[str, dict]] = []
+    tests = {}
     for name in LEGALBENCH_SETS:
         rows = json.loads((out / "benchmarks" / f"{name}.json").read_text(encoding="utf-8"))["tests"]
         if len(rows) > LEGALBENCH_MINI_PER_SET:
             # benchmark.py's SORT_BY_DOCUMENT order: a random key seeded by the first snippet's file.
             rows = sorted(rows, key=lambda t: random.Random(t["snippets"][0]["file_path"]).random())
             rows = rows[:LEGALBENCH_MINI_PER_SET]
-        tests += [(name, t) for t in (rows if queries is None else rows[:queries])]
-    spans = {
-        f"{name}-{n}": tuple((ids[s["file_path"]], *s["span"]) for s in t["snippets"])
-        for n, (name, t) in enumerate(tests)
-    }
-    return RankedSuite(
-        name="legalbench_rag",
-        items=items,
-        queries=tuple(
-            RankedQuery(id=f"{name}-{n}", text=t["query"], group=name, relevant=dict.fromkeys((s[0] for s in spans[f"{name}-{n}"]), 1))
-            for n, (name, t) in enumerate(tests)
-        ),
-        spans=spans,
-    )
+        tests[name] = [
+            (row["query"], [(ids[snippet["file_path"]], *snippet["span"]) for snippet in row["snippets"]])
+            for row in rows
+        ]
+    return items, tests
+
+
+def legalbench_rag(*, queries: int | None) -> RankedSuite:
+    """The 776 mini questions (194 per set) over the full 714-document corpus.
+
+    The neutral file names are used for both sources because the original paths name the parties.
+    """
+    source = _legalbench_mini_path()
+    if source.suffix == ".xz":
+        contents = read_json(source)
+        items = tuple(
+            TextItem(id=doc_id, text=text, filename=f"{doc_id}.txt")
+            for doc_id, text in contents["documents"]
+        )
+        tests = contents["tests"]
+    else:
+        items, tests = _legalbench_cached()
+
+    rows = [(name, text, references) for name in LEGALBENCH_SETS for text, references in tests[name][:queries]]
+    spans = {}
+    ranked_queries = []
+    for index, (name, text, references) in enumerate(rows):
+        query_id = f"{name}-{index}"
+        spans[query_id] = tuple((doc_id, start, end) for doc_id, start, end in references)
+        relevant = dict.fromkeys((doc_id for doc_id, _, _ in spans[query_id]), 1)
+        ranked_queries.append(RankedQuery(id=query_id, text=text, group=name, relevant=relevant))
+    return RankedSuite(name="legalbench_rag", items=items, queries=tuple(ranked_queries), spans=spans)

@@ -56,6 +56,9 @@ jobs:
           vidore = get_dataset('vidore-v3-markdown')
           assert len(vidore.load_queries('computer_science')) == 1290
           assert len(vidore.load_documents('computer_science')) == 1358
+          legalbench = get_dataset('legalbench-rag')
+          assert len(legalbench.load_queries('mini')) == 776
+          assert len(legalbench.load_documents('mini')) == 714
           splits = {
               'locomo': {'locomo10': 1540},
               'beam': {'100k': 400, '500k': 700, '1m': 700, '10m': 200},
@@ -115,6 +118,8 @@ jobs:
               knowledge = json.load(response)
           assert 'computer_science' in knowledge['datasets']['vidore-v3-markdown']
           assert 'computer_science' not in knowledge['split_errors'].get('vidore-v3-markdown', {})
+          assert knowledge['datasets']['legalbench-rag'] == ['mini']
+          assert 'mini' not in knowledge['split_errors']['legalbench-rag']
           remote_config = Request(f'{base_url}/api/config', headers={'Host': 'amb.example.test:8090'})
           with urlopen(remote_config, timeout=2) as response:
               assert json.load(response)['datasets'] == config['datasets']

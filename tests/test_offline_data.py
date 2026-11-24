@@ -2,6 +2,7 @@ import gzip
 import hashlib
 import io
 import socket
+from collections import Counter
 
 import pytest
 
@@ -57,6 +58,25 @@ def test_vidore_computer_science_markdown_loads_without_network_or_cache(offline
     assert all(doc.content.strip() for doc in documents)
     assert all(path.is_file() for path in knowledge_data.workbench_cache_files(dataset.name, split))
     assert any(not path.is_file() for path in knowledge_data.workbench_cache_files("vidore-v3-pdf", split))
+    assert not list(tmp_path.iterdir())
+
+
+def test_legalbench_mini_loads_full_corpus_and_gold_spans_without_network(offline, monkeypatch, tmp_path):
+    monkeypatch.setattr(knowledge_data, "CACHE", tmp_path)
+    monkeypatch.setenv("AMB_KNOWLEDGE_OFFLINE", "1")
+    dataset = get_dataset("legalbench-rag")
+    queries = dataset.load_queries("mini")
+    documents = {doc.id: doc.content for doc in dataset.load_documents("mini")}
+
+    assert len(documents) == 714
+    assert len({query.id for query in queries}) == len(queries) == 776
+    assert Counter(query.meta["group"] for query in queries) == dict.fromkeys(knowledge_data.LEGALBENCH_SETS, 194)
+    for query in queries:
+        spans = query.meta["gold_spans"]
+        assert spans and {source_id for source_id, _, _ in spans} == set(query.gold_ids)
+        assert all(0 <= start < end <= len(documents[source_id]) for source_id, start, end in spans)
+    assert len(dataset.load_queries("mini", limit=2)) == 8
+    assert all(path.is_file() for path in knowledge_data.workbench_cache_files(dataset.name, "mini"))
     assert not list(tmp_path.iterdir())
 
 

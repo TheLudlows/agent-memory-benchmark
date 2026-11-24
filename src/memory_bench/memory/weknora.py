@@ -27,6 +27,15 @@ _PENDING = {"pending", "processing", "finalizing"}
 _TOP_K_LIMIT = 200
 
 
+def normalize_tenant_id(value: str) -> str:
+    tenant_id = value.strip()
+    if not tenant_id:
+        return ""
+    if not re.fullmatch(r"[0-9]{1,20}", tenant_id) or not 0 < int(tenant_id) < 2**64:
+        raise ValueError("WeKnora 工作空间 ID 必须是有效的正整数。")
+    return str(int(tenant_id))
+
+
 def _legal_upload_padding(documents: list[Document]) -> dict[str, str]:
     # WeKnora deduplicates file bytes. Trailing newlines distinguish repeated contracts
     # without shifting any scored source offsets or introducing searchable text.
@@ -138,6 +147,7 @@ class WeKnoraMemoryProvider(MemoryProvider):
         if self._url and not self._url.endswith("/api/v1"):
             self._url += "/api/v1"
         self._key = os.getenv("WEKNORA_API_KEY", "").strip()
+        self._tenant_id = normalize_tenant_id(os.getenv("WEKNORA_TENANT_ID", ""))
         self._embedding_model = os.getenv("WEKNORA_EMBEDDING_MODEL_ID", "").strip()
         self._vlm_model = os.getenv("WEKNORA_VLM_MODEL_ID", "").strip()
         self._http: httpx.Client | None = None
@@ -164,7 +174,10 @@ class WeKnoraMemoryProvider(MemoryProvider):
             raise ValueError("WEKNORA_API_URL must be an HTTP(S) API address.") from None
         if address.scheme not in {"http", "https"} or not address.hostname or address.username is not None or address.query or address.fragment:
             raise ValueError("WEKNORA_API_URL must be an HTTP(S) API address without credentials, a query or a fragment.")
-        self._http = httpx.Client(base_url=self._url, headers={"X-API-Key": self._key}, timeout=120.0)
+        headers = {"X-API-Key": self._key}
+        if self._tenant_id:
+            headers["X-Tenant-ID"] = self._tenant_id
+        self._http = httpx.Client(base_url=self._url, headers=headers, timeout=120.0)
 
     def cleanup(self) -> None:
         if self._http is not None:
@@ -184,6 +197,8 @@ class WeKnoraMemoryProvider(MemoryProvider):
         state = json.loads(self._state_path.read_text(encoding="utf-8"))
         if state["url"] != self._url or state["dataset"] != self.dataset_name:
             raise ValueError("WeKnora knowledge base belongs to a different connection or dataset.")
+        if state.get("tenant_id", "") != self._tenant_id:
+            raise ValueError("WeKnora workspace changed. Run ingestion again.")
         if state["models"] != self._models():
             raise ValueError("WeKnora model configuration changed. Run ingestion again.")
         self._kb_id = state["knowledge_base_id"]
@@ -359,6 +374,7 @@ class WeKnoraMemoryProvider(MemoryProvider):
                     self._check_image_index(next(iter(pending)))
         write_json(self._state_path, {
             "url": self._url,
+            "tenant_id": self._tenant_id,
             "dataset": self.dataset_name,
             "models": self._models(),
             "knowledge_base_id": self._kb_id,

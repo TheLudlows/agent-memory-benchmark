@@ -22,6 +22,7 @@ from memory_bench.workbench_worker import run
 def weknora_http(monkeypatch):
     monkeypatch.setenv("WEKNORA_API_URL", "http://weknora.test/api/v1/")
     monkeypatch.setenv("WEKNORA_API_KEY", "test-secret")
+    monkeypatch.delenv("WEKNORA_TENANT_ID", raising=False)
     monkeypatch.setenv("WEKNORA_EMBEDDING_MODEL_ID", "embed-id")
     monkeypatch.setenv("WEKNORA_VLM_MODEL_ID", "vlm-id")
     client = httpx.Client
@@ -55,11 +56,15 @@ def _success(data):
     return httpx.Response(200, json={"success": True, "data": data})
 
 
-@pytest.mark.parametrize(("dataset_class", "split"), [
-    (VidoreMarkdownDataset, "hr"),
-    (BrowseCompPlusDataset, "evidence"),
+@pytest.mark.parametrize(("dataset_class", "split", "tenant_id"), [
+    (VidoreMarkdownDataset, "computer_science", "9007199254740993"),
+    (BrowseCompPlusDataset, "evidence", None),
 ])
-def test_weknora_scores_ranked_text_after_the_index_is_ready(dataset_class, split, weknora_http, monkeypatch, tmp_path):
+def test_weknora_scores_ranked_text_after_the_index_is_ready(
+    dataset_class, split, tenant_id, weknora_http, monkeypatch, tmp_path,
+):
+    if tenant_id is not None:
+        monkeypatch.setenv("WEKNORA_TENANT_ID", tenant_id)
     monkeypatch.setattr(dataset_class, "_load", lambda self, split: data.RankedSuite(
         name="text",
         items=(
@@ -73,6 +78,7 @@ def test_weknora_scores_ranked_text_after_the_index_is_ready(dataset_class, spli
     monkeypatch.setattr(weknora, "sleep", lambda seconds: None)
 
     def respond(request):
+        assert request.headers.get("X-Tenant-ID") == tenant_id
         path = request.url.path.removeprefix("/api/v1")
         if path == "/knowledge-bases":
             assert request.method == "POST"
@@ -260,3 +266,30 @@ def test_weknora_create_error_reports_bounded_diagnostics(weknora_http, response
         assert calls == [("POST", "/api/v1/knowledge-bases")]
     finally:
         provider.cleanup()
+
+
+def test_weknora_resume_checks_workspace_and_accepts_legacy_state(weknora_http, monkeypatch, tmp_path):
+    state_path = tmp_path / "weknora_knowledge_base.json"
+    state = {
+        "url": "http://weknora.test/api/v1", "dataset": "vidore-v3-markdown",
+        "knowledge_base_id": "kb-id", "document_ids": {"remote-page": "page"},
+        "models": {"embedding": "embed-id", "vlm": ""},
+    }
+    state_path.write_text(json.dumps(state), encoding="utf-8")
+    legacy = weknora.WeKnoraMemoryProvider()
+    legacy.dataset_name = state["dataset"]
+    legacy.prepare(tmp_path, reset=False)
+    assert legacy._kb_id == "kb-id"
+
+    state_path.write_text(json.dumps({**state, "tenant_id": "42"}), encoding="utf-8")
+    monkeypatch.setenv("WEKNORA_TENANT_ID", "00042")
+    matching = weknora.WeKnoraMemoryProvider()
+    matching.dataset_name = state["dataset"]
+    matching.prepare(tmp_path, reset=False)
+    assert matching._kb_id == "kb-id"
+
+    monkeypatch.setenv("WEKNORA_TENANT_ID", "99")
+    other = weknora.WeKnoraMemoryProvider()
+    other.dataset_name = state["dataset"]
+    with pytest.raises(ValueError, match="workspace changed"):
+        other.prepare(tmp_path, reset=False)

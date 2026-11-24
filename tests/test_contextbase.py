@@ -268,7 +268,7 @@ def test_contextbase_knowledge_worker_scores_original_documents(
         calls.append(path)
         if request.method == "PUT":
             assert auto_bank and calls == [""]
-            assert request.headers["Authorization"] == "Bearer test-admin-token"
+            assert request.headers["Authorization"] == "Bearer test-token"
             assert request.headers["If-None-Match"] == "*"
             assert json.loads(request.content) == {"enable_observations": False}
             return httpx.Response(200, json={"bank_id": bank_id})
@@ -302,7 +302,7 @@ def test_contextbase_knowledge_worker_scores_original_documents(
         ]})
 
     _configure_contextbase(monkeypatch, handler)
-    monkeypatch.setenv("CONTEXTBASE_BENCH_ADMIN_TOKEN", "test-admin-token")
+    monkeypatch.setenv("CONTEXTBASE_BENCH_ADMIN_TOKEN", "unused-cli-admin-token")
     if auto_bank:
         monkeypatch.delenv("CONTEXTBASE_BANK_ID")
     (tmp_path / "run.json").write_text(json.dumps({
@@ -350,7 +350,7 @@ def test_contextbase_legalbench_scores_ranked_original_chunks(monkeypatch, tmp_p
             assert request.headers["Authorization"] == "Bearer test-admin-token"
             assert json.loads(request.content) == {"enable_observations": False, "retain_extraction_mode": "chunks"}
             return httpx.Response(200, json={"bank_id": bank_id})
-        assert request.headers["Authorization"] == "Bearer test-token"
+        assert request.headers["Authorization"] == "Bearer test-admin-token"
         if path == "/memories":
             assert request.method == "POST"
             body = json.loads(request.content)
@@ -394,7 +394,8 @@ def test_contextbase_legalbench_scores_ranked_original_chunks(monkeypatch, tmp_p
 
     _configure_contextbase(monkeypatch, handler)
     monkeypatch.delenv("CONTEXTBASE_BANK_ID")
-    monkeypatch.setenv("CONTEXTBASE_BENCH_ADMIN_TOKEN", "test-admin-token")
+    monkeypatch.delenv("CONTEXTBASE_BENCH_ADMIN_TOKEN", raising=False)
+    monkeypatch.setenv("CONTEXTBASE_API_TOKEN", "test-admin-token")
     (tmp_path / "run.json").write_text(json.dumps({
         "id": run_id, "name": "ContextBase contract evidence",
         "selection": {"backend": "contextbase-knowledge", "dataset": "legalbench-rag", "split": "mini", "query_limit": 1},
@@ -413,7 +414,8 @@ def test_contextbase_legalbench_scores_ranked_original_chunks(monkeypatch, tmp_p
         assert summary["scoring_failed_queries"] == 1
 
 
-def test_contextbase_knowledge_auto_bank_requires_fresh_ingestion_and_admin_access(monkeypatch, tmp_path):
+@pytest.mark.parametrize("workbench", [True, False])
+def test_contextbase_knowledge_auto_bank_requires_fresh_ingestion_and_admin_access(monkeypatch, tmp_path, workbench):
     calls = []
 
     def handler(request):
@@ -422,17 +424,24 @@ def test_contextbase_knowledge_auto_bank_requires_fresh_ingestion_and_admin_acce
 
     _configure_contextbase(monkeypatch, handler)
     monkeypatch.delenv("CONTEXTBASE_BANK_ID")
-    monkeypatch.setenv("CONTEXTBASE_BENCH_ADMIN_TOKEN", "test-admin-token")
-    provider = get_memory_provider("contextbase-knowledge")
+    bank_id = "amb_rag_test" if workbench else ""
+    if workbench:
+        monkeypatch.delenv("CONTEXTBASE_BENCH_ADMIN_TOKEN", raising=False)
+    else:
+        monkeypatch.setenv("CONTEXTBASE_BENCH_ADMIN_TOKEN", "test-admin-token")
+    provider = contextbase.ContextBaseKnowledgeProvider(auto_bank_id=bank_id)
     try:
         with pytest.raises(ValueError, match="original CONTEXTBASE_BANK_ID"):
             provider.prepare(tmp_path, reset=False)
         assert calls == []
-        with pytest.raises(RuntimeError, match=r"HTTP 403.*CONTEXTBASE_BENCH_ADMIN_TOKEN"):
+        source = "Workbench API Key field" if workbench else "CONTEXTBASE_BENCH_ADMIN_TOKEN"
+        with pytest.raises(RuntimeError, match=rf"HTTP 403.*{source}"):
             provider.prepare(tmp_path)
+        expected_bank_id = bank_id or f"amb_rag_{provider.ingestion_run_id}"
         assert [(request.method, request.url.path) for request in calls] == [
-            ("PUT", f"/tenant-api/v1/default/banks/amb_rag_{provider.ingestion_run_id}"),
+            ("PUT", f"/tenant-api/v1/default/banks/{expected_bank_id}"),
         ]
+        assert calls[0].headers["Authorization"] == ("Bearer test-token" if workbench else "Bearer test-admin-token")
     finally:
         provider.cleanup()
 

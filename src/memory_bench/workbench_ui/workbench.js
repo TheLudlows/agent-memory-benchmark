@@ -327,12 +327,12 @@ function updateForm() {
   const config = settings.backends[backend];
   const connection = connectionInput();
   const saved = selectedConnection();
-  const autoBank = backend === "contextbase-knowledge" &&
-    config.auto_bank_url === connection.api_url.replace(/\/+$/, "");
-  $("connection-bank").placeholder = autoBank ? "留空则自动创建" : saved?.has_bank_mapping ? "使用已有 Bank 映射" : "已授权的测试 Bank";
+  const contextBaseKnowledge = backend === "contextbase-knowledge";
+  const autoBank = contextBaseKnowledge && !connection.bank_id;
+  $("connection-bank").placeholder = contextBaseKnowledge ? "留空则自动创建" : saved?.has_bank_mapping ? "使用已有 Bank 映射" : "已授权的测试 Bank";
   $("connection-bank-help").hidden = !autoBank;
   $("connection-bank-help").textContent = autoBank
-    ? "留空时每轮创建独立 Bank 并关闭观察。业务 Key 需有新建 Bank 的读写权限。" : "";
+    ? "留空时每轮创建独立 Bank 并关闭观察。请在 API Key 栏填写 ContextBase 管理员 Key，仅用于本轮。" : "";
   const descriptions = {
     "contextbase": "使用预先授权的测试 Bank。",
     "contextbase-knowledge": dataset === "legalbench-rag"
@@ -344,8 +344,10 @@ function updateForm() {
     "weknora": "连接 WeKnora API。每轮创建一个评测知识库。",
   };
   $("backend-help").textContent = descriptions[backend];
-  $("connection-reuse-row").hidden = !saved?.has_key;
-  $("connection-key").placeholder = saved?.has_key ? "填写新 Key 可更新" : config.key_optional ? "选填" : "请输入 API Key";
+  if (autoBank) $("connection-reuse").checked = false;
+  $("connection-reuse-row").hidden = autoBank || !saved?.has_key;
+  $("connection-key").placeholder = autoBank ? "ContextBase 管理员 Key" :
+    saved?.has_key ? "填写新 Key 可更新" : config.key_optional ? "选填" : "请输入 API Key";
   const usingSaved = saved?.has_key && $("connection-reuse").checked;
   const splitError = settings.split_errors?.[$("dataset").value]?.[$("split").value];
   for (const editor of Object.values(modelEditors)) updateModelEditor(editor);
@@ -877,7 +879,11 @@ $("run-form").addEventListener("submit", async (event) => {
     historyOffset = 0;
     $("evaluation-name").value = "";
     settings.backends[backend] = job.backend_config;
-    loadConnection();
+    if (job.target.auto_bank) {
+      $("connection-key").value = "";
+    } else {
+      loadConnection();
+    }
     await refresh();
   } catch (error) {
     setError("form-error", error.message);

@@ -15,6 +15,7 @@ from .dataset import REGISTRY as DATASET_REGISTRY, get_dataset
 from .dataset.knowledge import WORKBENCH_KNOWLEDGE_DATASETS
 from .llm import REGISTRY as LLM_REGISTRY, get_llm, get_answer_llm
 from .memory import REGISTRY as MEMORY_REGISTRY, get_memory_provider
+from .memory.contextbase import ContextBaseKnowledgeProvider
 from .modes import REGISTRY as MODE_REGISTRY, get_mode
 from .runner import EvalRunner
 
@@ -79,6 +80,13 @@ def run(
                 "ContextBase supports LoCoMo, BEAM, LongMemEval and LifeBench 1.0 / 2.0 in rag mode, "
                 "and PrecisionMemBench in retrieval mode.", param_hint="--memory",
             )
+    if memory == "contextbase-knowledge" and (
+        dataset not in ContextBaseKnowledgeProvider.supported_datasets or mode != "retrieval"
+    ):
+        raise typer.BadParameter(
+            "ContextBase knowledge retrieval supports ViDoRe V3 Markdown and BrowseComp-Plus in retrieval mode.",
+            param_hint="--memory",
+        )
     if memory == "weknora" and (dataset not in WORKBENCH_KNOWLEDGE_DATASETS or mode != "retrieval"):
         raise typer.BadParameter(
             "WeKnora supports Workbench knowledge datasets in retrieval mode.", param_hint="--memory",

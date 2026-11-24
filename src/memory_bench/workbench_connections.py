@@ -13,7 +13,9 @@ from pydantic import BaseModel, ConfigDict, Field, SecretStr
 from .json_files import write_json
 
 
-BackendId = Literal["contextbase", "mem0-cloud", "hindsight-http", "hindsight-knowledge", "weknora"]
+BackendId = Literal[
+    "contextbase", "contextbase-knowledge", "mem0-cloud", "hindsight-http", "hindsight-knowledge", "weknora",
+]
 
 
 @dataclass(frozen=True)
@@ -30,6 +32,7 @@ BACKENDS: dict[BackendId, Backend] = {
                                    "http://127.0.0.1:8888", key_optional=True),
     "weknora": Backend("WeKnora", "WEKNORA_API_URL", "WEKNORA_API_KEY"),
     "contextbase": Backend("ContextBase", "CONTEXTBASE_API_URL", "CONTEXTBASE_API_TOKEN"),
+    "contextbase-knowledge": Backend("ContextBase", "CONTEXTBASE_API_URL", "CONTEXTBASE_API_TOKEN"),
     "mem0-cloud": Backend("Mem0 Cloud", "MEM0_CLOUD_URL", "MEM0_CLOUD_KEY", "https://api.mem0.ai"),
     "hindsight-http": Backend("Hindsight HTTP", "HINDSIGHT_HTTP_URL", "HINDSIGHT_HTTP_KEY",
                               "http://127.0.0.1:8888", key_optional=True),
@@ -97,6 +100,8 @@ class Connection:
             missing.append("API 地址")
         if not BACKENDS[backend].key_optional and not self.api_key:
             missing.append("API Key")
+        if backend == "contextbase-knowledge" and not self.bank_id:
+            missing.append("Bank ID")
         if backend == "contextbase" and not (self.bank_id or self.bank_mapping):
             missing.append("Bank ID")
         if backend == "weknora":
@@ -109,7 +114,7 @@ class Connection:
     def worker_env(self, backend: BackendId) -> dict[str, str]:
         spec = BACKENDS[backend]
         env = {spec.url_env: self.api_url, spec.key_env: self.api_key}
-        if backend == "contextbase":
+        if backend in {"contextbase", "contextbase-knowledge"}:
             env.update(CONTEXTBASE_BANK_ID=self.bank_id, CONTEXTBASE_BENCH_BANKS=self.bank_mapping)
         elif backend == "weknora":
             env.update(WEKNORA_EMBEDDING_MODEL_ID=self.embedding_model_id, WEKNORA_VLM_MODEL_ID=self.vlm_model_id)
@@ -128,6 +133,8 @@ def _environment_connection(backend: BackendId) -> Connection:
     if backend == "contextbase":
         return Connection(api_url, key, os.getenv("CONTEXTBASE_BANK_ID", "").strip(),
                           os.getenv("CONTEXTBASE_BENCH_BANKS", "").strip())
+    if backend == "contextbase-knowledge":
+        return Connection(api_url, key, os.getenv("CONTEXTBASE_BANK_ID", "").strip())
     if backend == "weknora":
         return Connection(api_url, key, embedding_model_id=os.getenv("WEKNORA_EMBEDDING_MODEL_ID", "").strip(),
                           vlm_model_id=os.getenv("WEKNORA_VLM_MODEL_ID", "").strip())
@@ -216,7 +223,7 @@ class Connections:
             if not current.api_key:
                 raise ValueError("已保存的 Key 仅可用于对应的 API 地址。请填写本轮 Key。")
             key = current.api_key
-        if backend != "contextbase" and request.bank_id:
+        if backend not in {"contextbase", "contextbase-knowledge"} and request.bank_id:
             raise ValueError("只有 ContextBase 需要 Bank ID。")
         if backend != "weknora" and (request.embedding_model_id is not None or request.vlm_model_id is not None):
             raise ValueError("只有 WeKnora 使用知识库模型 ID。")

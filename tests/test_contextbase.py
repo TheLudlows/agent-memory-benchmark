@@ -5,10 +5,14 @@ import pytest
 from typer.testing import CliRunner
 
 from memory_bench import cli, llm, runner
+from memory_bench.dataset import knowledge_data as data
+from memory_bench.dataset.knowledge import BrowseCompPlusDataset, VidoreMarkdownDataset
 from memory_bench.dataset.locomo import LoComoDataset
 from memory_bench.memory import get_memory_provider
 from memory_bench.memory import contextbase
 from memory_bench.models import Document
+from memory_bench.workbench import SCORING_INCOMPLETE_EXIT_CODE
+from memory_bench.workbench_worker import run
 
 
 def _configure_contextbase(monkeypatch, handler):
@@ -236,3 +240,76 @@ def test_failed_rerun_and_invalid_ingestion_id_do_not_mix_results(monkeypatch, t
         assert isinstance(invalid.exception, ValueError)
         assert "no completed ingest" in str(invalid.exception)
         assert json.loads(output.read_text()) == partial
+
+
+@pytest.mark.parametrize(("dataset", "split", "foreign_source"), [
+    (VidoreMarkdownDataset, "computer_science", False),
+    (BrowseCompPlusDataset, "evidence", False),
+    (VidoreMarkdownDataset, "computer_science", True),
+])
+def test_contextbase_knowledge_worker_scores_original_documents(
+    monkeypatch, tmp_path, dataset, split, foreign_source,
+):
+    monkeypatch.setattr(dataset, "_load", lambda self, split: data.RankedSuite(
+        name="scope",
+        items=(
+            data.TextItem(id="page-one", text="first source", filename="page-one.md"),
+            data.TextItem(id="page-two", text="second source", filename="page-two.md"),
+        ),
+        queries=(data.RankedQuery(id="q1", text="Query", group="english", relevant={"page-two": 1}),),
+    ))
+    calls, retained = [], {}
+
+    def handler(request):
+        assert request.headers["Authorization"] == "Bearer test-token"
+        path = request.url.path.removeprefix("/tenant-api/v1/default/banks/test-bank")
+        calls.append(path)
+        if path == "/memories":
+            payload = json.loads(request.content)
+            assert payload["async"] is True
+            for item in payload["items"]:
+                assert item["document_id"].startswith("amb-")
+                retained[item["metadata"]["doc_id"]] = item
+            assert {item["content"] for item in retained.values()} == {"first source", "second source"}
+            return httpx.Response(200, json={
+                "success": True, "async": True, "items_count": 2, "operation_ids": ["retain-1", "retain-2"],
+            })
+        if path in {"/operations/retain-1", "/operations/retain-2"}:
+            assert request.method == "GET"
+            return httpx.Response(200, json={"status": "completed"})
+        assert path == "/memories/recall"
+        assert calls == ["/memories", "/operations/retain-1", "/operations/retain-2", "/memories/recall"]
+        body = json.loads(request.content)
+        assert body["tags_match"] == "all_strict"
+        assert body["tags"] == retained["page-one"]["tags"] == retained["page-two"]["tags"]
+        assert body["types"] == ["world", "experience"]
+        source = "amb-previous-run-page-two" if foreign_source else retained["page-two"]["document_id"]
+        return httpx.Response(200, json={"results": [
+            {"document_id": source, "text": "best passage"},
+            {"document_id": source, "text": "another passage on the same page"},
+            {"document_id": retained["page-one"]["document_id"], "text": "less relevant"},
+        ]})
+
+    _configure_contextbase(monkeypatch, handler)
+    (tmp_path / "run.json").write_text(json.dumps({
+        "id": "contextbase-knowledge-smoke", "name": "ContextBase document ranking",
+        "selection": {"backend": "contextbase-knowledge", "dataset": dataset.name, "split": split, "query_limit": 1},
+        "models": {},
+    }), encoding="utf-8")
+
+    expected_exit = SCORING_INCOMPLETE_EXIT_CODE if foreign_source else 0
+    assert run(tmp_path) == expected_exit
+    summary = json.loads((tmp_path / "summary.json").read_text())
+    assert summary["score"] == (None if foreign_source else 1.0)
+    assert summary["score_type"] == "ndcg@10"
+    assert summary["ingested_docs"] == 2
+    assert summary["answer_llm"] is None and summary["judge_llm"] is None
+
+
+def test_cli_rejects_unsupported_contextbase_knowledge_dataset():
+    result = CliRunner().invoke(cli.app, [
+        "run", "--memory", "contextbase-knowledge", "--mode", "retrieval",
+        "--dataset", "vidore-v3-pdf", "--split", "computer_science",
+    ])
+    assert result.exit_code == 2
+    assert "ContextBase knowledge retrieval supports" in result.output

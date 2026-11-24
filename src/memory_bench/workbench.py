@@ -40,6 +40,7 @@ from .dataset.personamem import SPLITS as PERSONAMEM_SPLITS
 from .dataset.personamem_offline import TOTAL_QUERIES as PERSONAMEM_QUERIES
 from .dataset.precisionmembench import SPLITS as PRECISIONMEMBENCH_SPLITS, TOTAL_QUERIES as PRECISIONMEMBENCH_QUERIES
 from .json_files import write_json
+from .memory.contextbase import ContextBaseKnowledgeProvider
 from .workbench_connections import BackendId, Connections, RunConnection
 from .workbench_models import ROLES, ModelInput, ModelProbeExit, ModelProbeInput, ModelSettings, Role
 
@@ -53,7 +54,10 @@ DATASETS = {
     "precisionmembench": PRECISIONMEMBENCH_SPLITS,
 }
 KNOWLEDGE_SPLITS = {name: cls.splits for name, cls in WORKBENCH_KNOWLEDGE_DATASETS.items()}
-KNOWLEDGE_BACKENDS: tuple[BackendId, ...] = ("hindsight-knowledge", "weknora")
+KNOWLEDGE_BACKENDS: tuple[BackendId, ...] = ("hindsight-knowledge", "weknora", "contextbase-knowledge")
+KNOWLEDGE_BACKEND_DATASETS: dict[BackendId, tuple[str, ...]] = {
+    "contextbase-knowledge": ContextBaseKnowledgeProvider.supported_datasets,
+}
 RETRIEVAL_DATASETS = {"precisionmembench"}
 CHOICE_DATASETS = {"personamem"}
 QUESTION_TYPE_FIELDS = {
@@ -104,6 +108,8 @@ class RunSelection(BaseModel):
             raise ValueError(f"Split {self.split!r} is unavailable for {self.dataset}.")
         if self.is_knowledge != (self.backend in KNOWLEDGE_BACKENDS):
             raise ValueError("请选择此评测类型支持的后端。")
+        if (supported := KNOWLEDGE_BACKEND_DATASETS.get(self.backend)) and self.dataset not in supported:
+            raise ValueError("此后端不支持所选知识库数据集。")
         return self
 
 
@@ -466,6 +472,7 @@ def create_app(output_dir: Path) -> FastAPI:
                     for name, splits in KNOWLEDGE_SPLITS.items()
                 },
                 "backends": {key: backends[key] for key in KNOWLEDGE_BACKENDS},
+                "backend_datasets": KNOWLEDGE_BACKEND_DATASETS,
             }
         return {
             "datasets": DATASETS,

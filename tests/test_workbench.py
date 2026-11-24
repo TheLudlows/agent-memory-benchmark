@@ -1742,7 +1742,7 @@ def test_workbench_knowledge_runs_are_scoped_and_score_without_models(monkeypatc
         assert set(config["datasets"]) == {
             "vidore-v3-markdown", "vidore-v3-pdf", "browsecomp-plus", "legalbench-rag", "miracl-vision",
         }
-        assert set(config["backends"]) == {"hindsight-knowledge", "weknora"}
+        assert set(config["backends"]) == {"hindsight-knowledge", "weknora", "contextbase-knowledge"}
         assert "models" not in config
         assert "hindsight-knowledge" not in client.get("/api/config").json()["backends"]
         assert client.post("/api/runs", json=payload).status_code == 422
@@ -1841,3 +1841,53 @@ def test_workbench_weknora_connections_and_model_requirements(monkeypatch, tmp_p
         weknora = client.get(f"{api}/config").json()["backends"]["weknora"]
         assert weknora["saved"] and weknora["vlm_model_id"] == "vision-id"
         assert [item["selection"]["backend"] for item in client.get(f"{api}/runs").json()] == ["weknora"]
+
+
+def test_workbench_contextbase_knowledge_connection_and_dataset(monkeypatch, tmp_path):
+    endpoint = "https://contextbase.example/gateway"
+    key = "contextbase-knowledge-test-key"
+    monkeypatch.setenv("CONTEXTBASE_API_URL", endpoint)
+    monkeypatch.setenv("CONTEXTBASE_API_TOKEN", key)
+    monkeypatch.setenv("CONTEXTBASE_BANK_ID", "knowledge-eval")
+    monkeypatch.setenv("CONTEXTBASE_BENCH_BANKS", '{"session": "memory-eval"}')
+    monkeypatch.setattr("memory_bench.workbench._dataset_error", lambda *_: None)
+
+    environments = []
+
+    def launch(*_, env, **__):
+        environments.append(env)
+        return SimpleNamespace(stdout=io.StringIO(), wait=lambda timeout=None: 0, poll=lambda: 0)
+
+    monkeypatch.setattr("memory_bench.workbench.subprocess.Popen", launch)
+    api = "/knowledge/api"
+    connection = {"api_url": endpoint, "use_saved_key": True, "bank_id": "knowledge-eval"}
+    payload = {
+        "name": "ContextBase knowledge run", "dataset": "vidore-v3-markdown", "split": "computer_science",
+        "backend": "contextbase-knowledge", "connection": connection,
+    }
+    with TestClient(create_app(tmp_path / "runs"), base_url="http://localhost") as client:
+        config = client.get(f"{api}/config")
+        settings = config.json()
+        assert settings["backend_datasets"]["contextbase-knowledge"] == ["vidore-v3-markdown", "browsecomp-plus"]
+        assert settings["backends"]["contextbase-knowledge"]["bank_id"] == "knowledge-eval"
+        assert not settings["backends"]["contextbase-knowledge"]["has_bank_mapping"]
+        assert "contextbase" not in settings["backends"]
+        assert "contextbase-knowledge" not in client.get("/api/config").json()["backends"]
+        assert key not in config.text
+        assert client.post("/api/runs", json=payload).status_code == 422
+        assert client.post(f"{api}/runs", json={**payload, "dataset": "vidore-v3-pdf"}).status_code == 422
+        missing = client.post(f"{api}/runs", json={**payload, "connection": {**connection, "bank_id": ""}})
+        assert missing.status_code == 422
+        assert "Bank ID" in missing.json()["detail"]
+        assert not environments
+
+        response = client.post(f"{api}/runs", json=payload)
+        _, job = await_result(client, response, api=api)
+        assert job["status"] == "completed"
+        assert job["models"] == {}
+        assert job["target"] == {"api_url": endpoint, "bank_id": "knowledge-eval"}
+        assert environments[0]["CONTEXTBASE_API_TOKEN"] == key
+        assert environments[0]["CONTEXTBASE_BANK_ID"] == "knowledge-eval"
+        assert environments[0]["CONTEXTBASE_BENCH_BANKS"] == ""
+        assert environments[0]["AMB_KNOWLEDGE_OFFLINE"] == "1"
+        assert key not in response.text and key not in client.get(f"{api}/runs").text

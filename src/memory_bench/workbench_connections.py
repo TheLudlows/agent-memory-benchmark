@@ -11,6 +11,7 @@ from urllib.parse import urlsplit
 from pydantic import BaseModel, ConfigDict, Field, SecretStr
 
 from .json_files import write_json
+from .memory.contextbase import BENCH_ADMIN_TOKEN_ENV
 from .memory.weknora import normalize_tenant_id
 
 
@@ -99,13 +100,13 @@ class Connection:
             result["tenant_id"] = self.tenant_id
         return result
 
-    def missing(self, backend: BackendId, *, requires_vlm: bool = False) -> list[str]:
+    def missing(self, backend: BackendId, *, requires_vlm: bool = False, auto_bank: bool = False) -> list[str]:
         missing = []
         if not self.api_url:
             missing.append("API 地址")
         if not BACKENDS[backend].key_optional and not self.api_key:
             missing.append("API Key")
-        if backend == "contextbase-knowledge" and not self.bank_id:
+        if backend == "contextbase-knowledge" and not (self.bank_id or auto_bank):
             missing.append("Bank ID")
         if backend == "contextbase" and not (self.bank_id or self.bank_mapping):
             missing.append("Bank ID")
@@ -152,6 +153,12 @@ def _environment_connection(backend: BackendId) -> Connection:
     return Connection(api_url, key)
 
 
+def _auto_bank_url(backend: BackendId, environment: Connection) -> str:
+    if backend == "contextbase-knowledge" and os.getenv(BENCH_ADMIN_TOKEN_ENV, "").strip():
+        return environment.api_url
+    return ""
+
+
 def write_private_json(path: Path, data: dict) -> None:
     path.parent.mkdir(parents=True, mode=0o700, exist_ok=True)
     write_json(path, data)
@@ -194,11 +201,16 @@ class Connections:
             entries.append(environment)
         default = entries[0] if entries else environment
         spec = BACKENDS[backend]
-        return {
+        auto_bank_url = _auto_bank_url(backend, environment)
+        auto_bank = bool(auto_bank_url and default.api_url == auto_bank_url)
+        result = {
             **default.public(), "label": spec.label, "key_optional": spec.key_optional,
-            "saved": bool(saved), "missing": default.missing(backend),
+            "saved": bool(saved), "missing": default.missing(backend, auto_bank=auto_bank),
             "connections": [connection.public() for connection in entries],
         }
+        if auto_bank_url:
+            result["auto_bank_url"] = auto_bank_url
+        return result
 
     def public(self) -> dict:
         with self.lock:
@@ -223,10 +235,10 @@ class Connections:
     def for_run(self, backend: BackendId, request: RunConnection, *, requires_vlm: bool = False) -> Connection:
         api_url = validate_api_url(request.api_url)
         key = request.supplied_key()
+        environment = _environment_connection(backend)
         with self.lock:
             current = self.saved.get(backend, {}).get(api_url)
         if current is None:
-            environment = _environment_connection(backend)
             current = environment if environment.api_url == api_url else Connection(api_url)
         if request.use_saved_key:
             if key:
@@ -247,6 +259,7 @@ class Connections:
         vlm_model_id = current.vlm_model_id if request.vlm_model_id is None else request.vlm_model_id.strip()
         tenant_id = normalize_tenant_id(current.tenant_id if request.tenant_id is None else request.tenant_id)
         connection = Connection(api_url, key, bank_id, mapping, embedding_model_id, vlm_model_id, tenant_id)
-        if missing := connection.missing(backend, requires_vlm=requires_vlm):
+        auto_bank = api_url == _auto_bank_url(backend, environment)
+        if missing := connection.missing(backend, requires_vlm=requires_vlm, auto_bank=auto_bank):
             raise ValueError("请填写本轮评测的 " + "、".join(missing))
         return connection

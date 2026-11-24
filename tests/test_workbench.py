@@ -1748,7 +1748,9 @@ def test_workbench_knowledge_runs_are_scoped_and_score_without_models(monkeypatc
         assert client.post("/api/runs", json=payload).status_code == 422
         assert client.post(f"{api}/runs", json={**payload, "backend": "hindsight-http"}).status_code == 422
         assert client.get(f"{api}/runs/{previous_id}").status_code == 404
-        missing = client.post(f"{api}/runs", json=payload)
+        assert "mini" not in config["split_errors"]["legalbench-rag"]
+        unprepared = {**payload, "dataset": "browsecomp-plus", "split": "evidence"}
+        missing = client.post(f"{api}/runs", json=unprepared)
         assert missing.status_code == 422
         assert "prepare-knowledge" in missing.json()["detail"]
         assert not calls

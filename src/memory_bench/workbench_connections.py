@@ -11,6 +11,7 @@ from urllib.parse import urlsplit
 from pydantic import BaseModel, ConfigDict, Field, SecretStr
 
 from .json_files import write_json
+from .memory.weknora import normalize_tenant_id
 
 
 BackendId = Literal[
@@ -47,6 +48,7 @@ class RunConnection(BaseModel):
     use_saved_key: bool = False
     embedding_model_id: str | None = Field(default=None, max_length=256)
     vlm_model_id: str | None = Field(default=None, max_length=256)
+    tenant_id: str | None = Field(default=None, max_length=20)
 
     def supplied_key(self) -> str:
         return clean_api_key(self.api_key)
@@ -84,6 +86,7 @@ class Connection:
     bank_mapping: str = ""
     embedding_model_id: str = ""
     vlm_model_id: str = ""
+    tenant_id: str = ""
 
     def public(self) -> dict:
         result = {
@@ -92,6 +95,8 @@ class Connection:
         }
         if self.embedding_model_id or self.vlm_model_id:
             result.update(embedding_model_id=self.embedding_model_id, vlm_model_id=self.vlm_model_id)
+        if self.tenant_id:
+            result["tenant_id"] = self.tenant_id
         return result
 
     def missing(self, backend: BackendId, *, requires_vlm: bool = False) -> list[str]:
@@ -117,7 +122,10 @@ class Connection:
         if backend in {"contextbase", "contextbase-knowledge"}:
             env.update(CONTEXTBASE_BANK_ID=self.bank_id, CONTEXTBASE_BENCH_BANKS=self.bank_mapping)
         elif backend == "weknora":
-            env.update(WEKNORA_EMBEDDING_MODEL_ID=self.embedding_model_id, WEKNORA_VLM_MODEL_ID=self.vlm_model_id)
+            env.update(
+                WEKNORA_EMBEDDING_MODEL_ID=self.embedding_model_id, WEKNORA_VLM_MODEL_ID=self.vlm_model_id,
+                WEKNORA_TENANT_ID=self.tenant_id,
+            )
         return env
 
 
@@ -136,8 +144,11 @@ def _environment_connection(backend: BackendId) -> Connection:
     if backend == "contextbase-knowledge":
         return Connection(api_url, key, os.getenv("CONTEXTBASE_BANK_ID", "").strip())
     if backend == "weknora":
-        return Connection(api_url, key, embedding_model_id=os.getenv("WEKNORA_EMBEDDING_MODEL_ID", "").strip(),
-                          vlm_model_id=os.getenv("WEKNORA_VLM_MODEL_ID", "").strip())
+        return Connection(
+            api_url, key, embedding_model_id=os.getenv("WEKNORA_EMBEDDING_MODEL_ID", "").strip(),
+            vlm_model_id=os.getenv("WEKNORA_VLM_MODEL_ID", "").strip(),
+            tenant_id=os.getenv("WEKNORA_TENANT_ID", "").strip(),
+        )
     return Connection(api_url, key)
 
 
@@ -227,12 +238,15 @@ class Connections:
             raise ValueError("只有 ContextBase 需要 Bank ID。")
         if backend != "weknora" and (request.embedding_model_id is not None or request.vlm_model_id is not None):
             raise ValueError("只有 WeKnora 使用知识库模型 ID。")
+        if backend != "weknora" and request.tenant_id is not None:
+            raise ValueError("只有 WeKnora 使用此工作空间 ID。")
         bank_id = request.bank_id.strip()
         mapping = current.bank_mapping if not bank_id else ""
         embedding_model_id = (current.embedding_model_id if request.embedding_model_id is None
                               else request.embedding_model_id.strip())
         vlm_model_id = current.vlm_model_id if request.vlm_model_id is None else request.vlm_model_id.strip()
-        connection = Connection(api_url, key, bank_id, mapping, embedding_model_id, vlm_model_id)
+        tenant_id = normalize_tenant_id(current.tenant_id if request.tenant_id is None else request.tenant_id)
+        connection = Connection(api_url, key, bank_id, mapping, embedding_model_id, vlm_model_id, tenant_id)
         if missing := connection.missing(backend, requires_vlm=requires_vlm):
             raise ValueError("请填写本轮评测的 " + "、".join(missing))
         return connection

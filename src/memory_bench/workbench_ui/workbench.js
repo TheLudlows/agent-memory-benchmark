@@ -157,6 +157,7 @@ function selectConnection() {
   $("connection-url").value = "";
   $("connection-bank").placeholder = connection?.has_bank_mapping ? "使用已有 Bank 映射" : "已授权的测试 Bank";
   $("connection-bank").value = connection?.bank_id || "";
+  $("connection-tenant").value = connection?.tenant_id || "";
   $("connection-embedding-model").value = connection?.embedding_model_id || "";
   $("connection-vlm-model").value = connection?.vlm_model_id || "";
   $("connection-key").value = "";
@@ -172,6 +173,7 @@ function connectionInput() {
     api_key: $("connection-key").value.trim() || null,
   };
   if (backend === "weknora") {
+    connection.tenant_id = $("connection-tenant").value.trim();
     connection.embedding_model_id = $("connection-embedding-model").value.trim();
     connection.vlm_model_id = $("connection-vlm-model").value.trim();
   }
@@ -369,6 +371,7 @@ function updateForm() {
   for (const id of ["backend", "connection-address", "connection-bank", "connection-key", "connection-reuse"]) {
     $(id).disabled = submitting;
   }
+  $("connection-tenant").disabled = submitting || !weknora;
   $("connection-embedding-model").disabled = submitting || !weknora;
   $("connection-vlm-model").disabled = submitting || !weknora;
   $("connection-url").disabled = submitting || Boolean(saved);
@@ -895,7 +898,10 @@ $("split").addEventListener("change", () => {
 });
 $("backend").addEventListener("change", loadConnection);
 $("connection-address").addEventListener("change", selectConnection);
-for (const id of ["evaluation-name", "connection-url", "connection-bank", "connection-embedding-model", "connection-vlm-model"]) {
+for (const id of [
+  "evaluation-name", "connection-url", "connection-bank", "connection-tenant",
+  "connection-embedding-model", "connection-vlm-model",
+]) {
   $(id).addEventListener("input", updateForm);
 }
 $("connection-key").addEventListener("input", () => {

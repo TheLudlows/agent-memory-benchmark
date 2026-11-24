@@ -211,6 +211,8 @@ class RunManager:
             target = {"api_url": connection.api_url, "bank_id": connection.bank_id}
             if selection.backend == "weknora":
                 target.update(embedding_model_id=connection.embedding_model_id, vlm_model_id=connection.vlm_model_id)
+                if connection.tenant_id:
+                    target["tenant_id"] = connection.tenant_id
             job = {
                 "id": run_id,
                 "name": selection.name,

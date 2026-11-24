@@ -1787,6 +1787,7 @@ def test_workbench_weknora_connections_and_model_requirements(monkeypatch, tmp_p
     monkeypatch.setenv("WEKNORA_API_KEY", key)
     monkeypatch.setenv("WEKNORA_EMBEDDING_MODEL_ID", "embedding-id")
     monkeypatch.delenv("WEKNORA_VLM_MODEL_ID", raising=False)
+    monkeypatch.setenv("WEKNORA_TENANT_ID", "7")
     monkeypatch.setattr("memory_bench.workbench._dataset_error", lambda *_: None)
 
     environments = []
@@ -1808,6 +1809,7 @@ def test_workbench_weknora_connections_and_model_requirements(monkeypatch, tmp_p
         weknora = config.json()["backends"]["weknora"]
         assert weknora["api_url"] == endpoint
         assert weknora["embedding_model_id"] == "embedding-id"
+        assert weknora["tenant_id"] == "7"
         assert weknora["has_key"] and key not in config.text
         assert "weknora" not in client.get("/api/config").json()["backends"]
         assert client.post("/api/runs", json=payload).status_code == 422
@@ -1822,24 +1824,31 @@ def test_workbench_weknora_connections_and_model_requirements(monkeypatch, tmp_p
         missing = client.post(f"{api}/runs", json={**text, "connection": other_connection})
         assert missing.status_code == 422
         assert "Embedding 模型 ID" in missing.json()["detail"]
+        invalid_connection = {**saved_connection, "vlm_model_id": "vision-id", "tenant_id": "other-space"}
+        invalid = client.post(f"{api}/runs", json={**payload, "connection": invalid_connection})
+        assert invalid.status_code == 422
+        assert "工作空间 ID" in invalid.json()["detail"]
         assert not environments
 
-        connection = {**saved_connection, "vlm_model_id": "vision-id"}
+        connection = {**saved_connection, "vlm_model_id": "vision-id", "tenant_id": "9007199254740993"}
         response = client.post(f"{api}/runs", json={**payload, "connection": connection})
         _, job = await_result(client, response, api=api)
         assert job["status"] == "completed"
         assert job["models"] == {}
         assert job["target"] == {
             "api_url": endpoint, "bank_id": "", "embedding_model_id": "embedding-id", "vlm_model_id": "vision-id",
+            "tenant_id": "9007199254740993",
         }
         assert environments[0]["WEKNORA_API_KEY"] == key
         assert environments[0]["WEKNORA_EMBEDDING_MODEL_ID"] == "embedding-id"
         assert environments[0]["WEKNORA_VLM_MODEL_ID"] == "vision-id"
+        assert environments[0]["WEKNORA_TENANT_ID"] == "9007199254740993"
         assert key not in response.text and key not in client.get(f"{api}/runs").text
 
     with TestClient(create_app(results), base_url="http://localhost") as client:
         weknora = client.get(f"{api}/config").json()["backends"]["weknora"]
         assert weknora["saved"] and weknora["vlm_model_id"] == "vision-id"
+        assert weknora["tenant_id"] == "9007199254740993"
         assert [item["selection"]["backend"] for item in client.get(f"{api}/runs").json()] == ["weknora"]
 
 

@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from time import monotonic, sleep
@@ -211,7 +212,7 @@ class WeKnoraMemoryProvider(MemoryProvider):
         except httpx.RequestError as exc:
             raise RuntimeError(f"WeKnora {operation} failed ({type(exc).__name__}).") from None
         if not response.is_success:
-            raise RuntimeError(f"WeKnora {operation} failed (HTTP {response.status_code}).")
+            raise RuntimeError(f"WeKnora {operation} failed {self._http_error(response)}")
         try:
             envelope = response.json()
         except ValueError:
@@ -219,6 +220,37 @@ class WeKnoraMemoryProvider(MemoryProvider):
         if not isinstance(envelope, dict) or envelope.get("success") is not True or "data" not in envelope:
             raise RuntimeError(f"WeKnora {operation} returned an invalid response.")
         return envelope
+
+    def _http_error(self, response: httpx.Response) -> str:
+        status = f"HTTP {response.status_code}"
+        if not response.is_client_error:
+            return f"({status})."
+
+        request_id = response.headers.get("X-Request-ID", "")
+        try:
+            payload = response.json()
+        except ValueError:
+            payload = {}
+        payload = payload if isinstance(payload, dict) else {}
+        error = payload.get("error")
+        if isinstance(error, dict):
+            code, message = error.get("code"), error.get("message")
+        else:
+            code, message = payload.get("code"), payload.get("message") or error
+
+        parts = [status]
+        if isinstance(code, (int, str)) and re.fullmatch(r"[A-Za-z0-9_.-]{1,64}", str(code)):
+            parts.append(f"code {code}")
+        if re.fullmatch(r"[A-Za-z0-9_.-]{1,96}", request_id):
+            parts.append(f"request ID {request_id}")
+        if isinstance(message, str):
+            if self._key:
+                message = message.replace(self._key, "[redacted]")
+            message = " ".join("".join(c if c.isprintable() else " " for c in message).split())
+        else:
+            message = ""
+        rendered = f"({', '.join(parts)})." + (f" {message[:300]}" if message else "")
+        return rendered.replace(self._key, "[redacted]") if self._key else rendered
 
     @staticmethod
     def _identifier(record: object, operation: str) -> str:

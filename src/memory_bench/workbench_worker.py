@@ -17,6 +17,7 @@ from .dataset.personamem_offline import OfflinePersonaMemDataset
 from .json_files import is_windows_file_contention, write_json
 from .judge import GeminiJudge, ScoringError
 from .memory import get_memory_provider
+from .memory.contextbase import ContextBaseKnowledgeProvider
 from .memory.hindsight import HindsightHTTPMemoryProvider
 from .memory.mem0_cloud import Mem0CloudMemoryProvider
 from .models import Document
@@ -59,6 +60,8 @@ def run(directory: Path) -> int:
         memory = HindsightHTTPMemoryProvider(bank_prefix=prefix)
     elif spec.backend == "mem0-cloud":
         memory = Mem0CloudMemoryProvider(user_prefix=prefix)
+    elif spec.backend == "contextbase-knowledge" and job.get("target", {}).get("auto_bank"):
+        memory = ContextBaseKnowledgeProvider(auto_bank_id=job["target"]["bank_id"])
     else:
         memory = get_memory_provider(spec.backend)
 

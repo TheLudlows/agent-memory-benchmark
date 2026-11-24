@@ -15,27 +15,36 @@ from .base import MemoryProvider, RetrievalError
 from .hindsight import _as_recall_response, _build_docs, _deduplicate_results
 
 
+BENCH_ADMIN_TOKEN_ENV = "CONTEXTBASE_BENCH_ADMIN_TOKEN"
+
+
+def knowledge_bank_id(run_id: str) -> str:
+    return f"amb_rag_{run_id}"
+
+
 class ContextBaseMemoryProvider(MemoryProvider):
     name = "contextbase"
     description = "ContextBase Retain and Recall over HTTP using pre-authorized Banks."
     kind = "cloud"
     supports_incremental_ingest = True
 
-    def __init__(self, *, single_bank: bool = False) -> None:
+    def __init__(self, *, single_bank_id: str | None = None) -> None:
         url = os.environ.get("CONTEXTBASE_API_URL", "").strip()
         token = os.environ.get("CONTEXTBASE_API_TOKEN", "").strip()
         if not url or not token:
             raise ValueError("Set CONTEXTBASE_API_URL and CONTEXTBASE_API_TOKEN for ContextBase.")
-        self._bank_id = os.environ.get("CONTEXTBASE_BANK_ID", "").strip()
-        self._bank_map = {} if single_bank else json.loads(os.environ.get("CONTEXTBASE_BENCH_BANKS") or "{}")
-        if not isinstance(self._bank_map, dict) or not all(
-            isinstance(bank, str) and bank.strip() for bank in self._bank_map.values()
-        ):
-            raise ValueError("CONTEXTBASE_BENCH_BANKS must map isolation unit IDs to Bank IDs.")
-        if single_bank and not self._bank_id:
-            raise ValueError("Set CONTEXTBASE_BANK_ID for ContextBase knowledge retrieval.")
-        if bool(self._bank_id) == bool(self._bank_map):
-            raise ValueError("Set either CONTEXTBASE_BANK_ID or CONTEXTBASE_BENCH_BANKS.")
+        if single_bank_id is None:
+            self._bank_id = os.environ.get("CONTEXTBASE_BANK_ID", "").strip()
+            self._bank_map = json.loads(os.environ.get("CONTEXTBASE_BENCH_BANKS") or "{}")
+            if not isinstance(self._bank_map, dict) or not all(
+                isinstance(bank, str) and bank.strip() for bank in self._bank_map.values()
+            ):
+                raise ValueError("CONTEXTBASE_BENCH_BANKS must map isolation unit IDs to Bank IDs.")
+            if bool(self._bank_id) == bool(self._bank_map):
+                raise ValueError("Set either CONTEXTBASE_BANK_ID or CONTEXTBASE_BENCH_BANKS.")
+        else:
+            self._bank_id = single_bank_id
+            self._bank_map = {}
 
         self._precision_documents: dict[str, dict[str, str]] = {}
         self._configured_run_id = os.environ.get("CONTEXTBASE_BENCH_RUN_ID")
@@ -296,13 +305,37 @@ class ContextBaseKnowledgeProvider(ContextBaseMemoryProvider):
     supported_datasets = ("vidore-v3-markdown", "browsecomp-plus")
     _unit = "knowledge"
 
-    def __init__(self) -> None:
-        super().__init__(single_bank=True)
+    def __init__(self, *, auto_bank_id: str = "") -> None:
+        bank_id = os.environ.get("CONTEXTBASE_BANK_ID", "").strip()
+        self._auto_bank = not bank_id
+        self._auto_bank_id = auto_bank_id
+        self._admin_token = os.environ.get(BENCH_ADMIN_TOKEN_ENV, "").strip() if self._auto_bank else ""
+        if self._auto_bank and not self._admin_token:
+            raise ValueError(f"Set CONTEXTBASE_BANK_ID or {BENCH_ADMIN_TOKEN_ENV} for ContextBase knowledge retrieval.")
+        if self._admin_token and self._admin_token == os.environ.get("CONTEXTBASE_API_TOKEN", "").strip():
+            raise ValueError("ContextBase auto Bank creation requires separate administrator and business API keys.")
+        super().__init__(single_bank_id=bank_id)
         self._source_ids: dict[str, str] = {}
 
     def prepare(self, store_dir: Path, unit_ids: set[str] | None = None, reset: bool = True) -> None:
         self._source_ids.clear()
+        if self._auto_bank and not reset:
+            raise ValueError("--skip-ingestion needs the original CONTEXTBASE_BANK_ID.")
         super().prepare(store_dir, {self._unit}, reset=reset)
+        if self._auto_bank:
+            bank_id = self._auto_bank_id or knowledge_bank_id(self.ingestion_run_id)
+            print(f"Creating ContextBase Bank {bank_id} with observations disabled.", flush=True)
+            try:
+                self._request(
+                    "PUT", f"v1/default/banks/{quote(bank_id, safe='')}",
+                    headers={"Authorization": f"Bearer {self._admin_token}", "If-None-Match": "*"},
+                    json={"enable_observations": False},
+                )
+            except httpx.HTTPStatusError as exc:
+                status = exc.response.status_code
+                details = f" Check the administrator API key in {BENCH_ADMIN_TOKEN_ENV}." if status in {401, 403} else ""
+                raise RuntimeError(f"ContextBase could not create Bank {bank_id} (HTTP {status}).{details}") from exc
+            self._bank_id = bank_id
 
     def _items_by_unit(self, documents: list[Document]) -> dict[str, list[dict]]:
         if not documents or any(doc.path or not doc.content.replace("\x00", "").strip() for doc in documents):
@@ -313,7 +346,14 @@ class ContextBaseKnowledgeProvider(ContextBaseMemoryProvider):
 
     def ingest(self, documents: list[Document]) -> None:
         self._source_ids.clear()
-        super().ingest(documents)
+        try:
+            super().ingest(documents)
+        except httpx.HTTPStatusError as exc:
+            if self._auto_bank and exc.response.status_code in {401, 403}:
+                raise RuntimeError(
+                    f"The ContextBase business API key needs read/write access to the newly created Bank {self._bank_id}."
+                ) from exc
+            raise
         self._source_ids = {self._retained_id(doc.id): doc.id for doc in documents}
 
     def validate_ingestion(self, documents: list[Document]) -> None:

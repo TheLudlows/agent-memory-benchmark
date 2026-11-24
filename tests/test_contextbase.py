@@ -242,13 +242,14 @@ def test_failed_rerun_and_invalid_ingestion_id_do_not_mix_results(monkeypatch, t
         assert json.loads(output.read_text()) == partial
 
 
-@pytest.mark.parametrize(("dataset", "split", "foreign_source"), [
-    (VidoreMarkdownDataset, "computer_science", False),
-    (BrowseCompPlusDataset, "evidence", False),
-    (VidoreMarkdownDataset, "computer_science", True),
+@pytest.mark.parametrize(("dataset", "split", "foreign_source", "auto_bank"), [
+    (VidoreMarkdownDataset, "computer_science", False, False),
+    (VidoreMarkdownDataset, "computer_science", False, True),
+    (BrowseCompPlusDataset, "evidence", False, False),
+    (VidoreMarkdownDataset, "computer_science", True, False),
 ])
 def test_contextbase_knowledge_worker_scores_original_documents(
-    monkeypatch, tmp_path, dataset, split, foreign_source,
+    monkeypatch, tmp_path, dataset, split, foreign_source, auto_bank,
 ):
     monkeypatch.setattr(dataset, "_load", lambda self, split: data.RankedSuite(
         name="scope",
@@ -259,11 +260,19 @@ def test_contextbase_knowledge_worker_scores_original_documents(
         queries=(data.RankedQuery(id="q1", text="Query", group="english", relevant={"page-two": 1}),),
     ))
     calls, retained = [], {}
+    run_id = "09a6147e16b94919a908f98863235a51c"
+    bank_id = f"amb_rag_{run_id}" if auto_bank else "test-bank"
 
     def handler(request):
-        assert request.headers["Authorization"] == "Bearer test-token"
-        path = request.url.path.removeprefix("/tenant-api/v1/default/banks/test-bank")
+        path = request.url.path.removeprefix(f"/tenant-api/v1/default/banks/{bank_id}")
         calls.append(path)
+        if request.method == "PUT":
+            assert auto_bank and calls == [""]
+            assert request.headers["Authorization"] == "Bearer test-admin-token"
+            assert request.headers["If-None-Match"] == "*"
+            assert json.loads(request.content) == {"enable_observations": False}
+            return httpx.Response(200, json={"bank_id": bank_id})
+        assert request.headers["Authorization"] == "Bearer test-token"
         if path == "/memories":
             payload = json.loads(request.content)
             assert payload["async"] is True
@@ -278,7 +287,9 @@ def test_contextbase_knowledge_worker_scores_original_documents(
             assert request.method == "GET"
             return httpx.Response(200, json={"status": "completed"})
         assert path == "/memories/recall"
-        assert calls == ["/memories", "/operations/retain-1", "/operations/retain-2", "/memories/recall"]
+        assert calls == ([""] if auto_bank else []) + [
+            "/memories", "/operations/retain-1", "/operations/retain-2", "/memories/recall",
+        ]
         body = json.loads(request.content)
         assert body["tags_match"] == "all_strict"
         assert body["tags"] == retained["page-one"]["tags"] == retained["page-two"]["tags"]
@@ -291,9 +302,13 @@ def test_contextbase_knowledge_worker_scores_original_documents(
         ]})
 
     _configure_contextbase(monkeypatch, handler)
+    monkeypatch.setenv("CONTEXTBASE_BENCH_ADMIN_TOKEN", "test-admin-token")
+    if auto_bank:
+        monkeypatch.delenv("CONTEXTBASE_BANK_ID")
     (tmp_path / "run.json").write_text(json.dumps({
-        "id": "contextbase-knowledge-smoke", "name": "ContextBase document ranking",
+        "id": run_id, "name": "ContextBase document ranking",
         "selection": {"backend": "contextbase-knowledge", "dataset": dataset.name, "split": split, "query_limit": 1},
+        "target": {"bank_id": bank_id, "auto_bank": auto_bank},
         "models": {},
     }), encoding="utf-8")
 
@@ -304,6 +319,30 @@ def test_contextbase_knowledge_worker_scores_original_documents(
     assert summary["score_type"] == "ndcg@10"
     assert summary["ingested_docs"] == 2
     assert summary["answer_llm"] is None and summary["judge_llm"] is None
+
+
+def test_contextbase_knowledge_auto_bank_requires_fresh_ingestion_and_admin_access(monkeypatch, tmp_path):
+    calls = []
+
+    def handler(request):
+        calls.append(request)
+        return httpx.Response(403, json={"error": "Forbidden"})
+
+    _configure_contextbase(monkeypatch, handler)
+    monkeypatch.delenv("CONTEXTBASE_BANK_ID")
+    monkeypatch.setenv("CONTEXTBASE_BENCH_ADMIN_TOKEN", "test-admin-token")
+    provider = get_memory_provider("contextbase-knowledge")
+    try:
+        with pytest.raises(ValueError, match="original CONTEXTBASE_BANK_ID"):
+            provider.prepare(tmp_path, reset=False)
+        assert calls == []
+        with pytest.raises(RuntimeError, match=r"HTTP 403.*CONTEXTBASE_BENCH_ADMIN_TOKEN"):
+            provider.prepare(tmp_path)
+        assert [(request.method, request.url.path) for request in calls] == [
+            ("PUT", f"/tenant-api/v1/default/banks/amb_rag_{provider.ingestion_run_id}"),
+        ]
+    finally:
+        provider.cleanup()
 
 
 def test_cli_rejects_unsupported_contextbase_knowledge_dataset():

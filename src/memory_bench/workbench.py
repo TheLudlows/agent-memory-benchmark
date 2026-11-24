@@ -40,7 +40,7 @@ from .dataset.personamem import SPLITS as PERSONAMEM_SPLITS
 from .dataset.personamem_offline import TOTAL_QUERIES as PERSONAMEM_QUERIES
 from .dataset.precisionmembench import SPLITS as PRECISIONMEMBENCH_SPLITS, TOTAL_QUERIES as PRECISIONMEMBENCH_QUERIES
 from .json_files import write_json
-from .memory.contextbase import ContextBaseKnowledgeProvider
+from .memory.contextbase import BENCH_ADMIN_TOKEN_ENV, ContextBaseKnowledgeProvider, knowledge_bank_id
 from .workbench_connections import BackendId, Connections, RunConnection
 from .workbench_models import ROLES, ModelInput, ModelProbeExit, ModelProbeInput, ModelSettings, Role
 
@@ -208,7 +208,10 @@ class RunManager:
             run_id = uuid4().hex
             directory = self.root / run_id
             directory.mkdir(mode=0o700)
+            auto_bank = selection.backend == "contextbase-knowledge" and not connection.bank_id
             target = {"api_url": connection.api_url, "bank_id": connection.bank_id}
+            if auto_bank:
+                target.update(bank_id=knowledge_bank_id(run_id), auto_bank=True)
             if selection.backend == "weknora":
                 target.update(embedding_model_id=connection.embedding_model_id, vlm_model_id=connection.vlm_model_id)
                 if connection.tenant_id:
@@ -229,6 +232,8 @@ class RunManager:
             }
             if selection.is_knowledge:
                 env["AMB_KNOWLEDGE_OFFLINE"] = "1"
+            if not auto_bank:
+                env.pop(BENCH_ADMIN_TOKEN_ENV, None)
             try:
                 process = subprocess.Popen(
                     [sys.executable, "-m", "memory_bench.workbench_worker", str(directory)],

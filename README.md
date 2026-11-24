@@ -181,7 +181,9 @@ ContextBase 使用预授权的测试 Bank，并以运行和题目所属的隔离
 
 在顶部选择「知识库检索」进入 `/knowledge`。这页独立保存连接和知识库评测历史，记忆评测仍从首页进入。每轮导入完整语料，等待写入完成后执行检索。AMB 无需配置回答模型或评分模型。
 
-Hindsight Knowledge 和 WeKnora 每轮创建一个评测知识库。**ContextBase** 支持 ViDoRe V3 Markdown 和 BrowseComp-Plus。选择其中一个数据集后，填写 ContextBase API 地址、业务 API Key 和已授权读写的测试 Bank ID。AMB 在该 Bank 内用独立标签隔离每轮语料，通过 Retain 写入，并按 Recall 返回的来源文档 ID 评分。评测数据会保留在 Bank 中。结果反映该 Bank 的 Retain 配置和 Recall 排序。要评测原文分块检索，可由管理员把测试 Bank 的提取模式设为 `chunks`。
+Hindsight Knowledge 和 WeKnora 每轮创建一个评测知识库。**ContextBase** 支持 ViDoRe V3 Markdown 和 BrowseComp-Plus。配置服务端环境变量 `CONTEXTBASE_API_URL` 和 `CONTEXTBASE_BENCH_ADMIN_TOKEN` 后，选择该地址，将 **Bank ID 留空**即可为每轮自动创建独立 Bank，并在创建时关闭观察。界面填写的业务 API Key 需有新建 Bank 的读写权限，例如授予所有 Bank 读写权限的评测专用 Key。管理员 Key 只用于建 Bank，可通过 Workbench 的环境变量或项目的 `.env` 文件配置。
+
+填写已有 Bank ID 时，AMB 使用该 Bank 的配置，并为每轮语料设置独立标签。两种方式都通过 Retain 写入，并按 Recall 返回的来源文档 ID 评分。Bank 与评测数据会保留，运行详情显示 Bank ID。要评测原文分块检索，可由管理员把已有测试 Bank 的提取模式设为 `chunks`。
 
 选择 WeKnora 后，填写服务地址、API Key 和该 WeKnora 服务中的 Embedding Model ID。使用平台级 API Key 时填写目标工作空间的数字 ID，AMB 会发送 `X-Tenant-ID`。使用空间级 API Key 时可留空。MIRACL-Vision 需要支持图像输入的 Embedding 模型和支持图像识别的 VLM Model ID。ViDoRe PDF 可选填 VLM Model ID。API Key 需要创建知识库、写入文档和检索的权限（`manage_kbs`、`ingest`、`retrieve`），并能访问本轮创建的知识库。ViDoRe PDF 需要 WeKnora 检索接口返回 PDF 页码来源。
 
@@ -210,7 +212,7 @@ docker compose --profile web up -d amb-web
 
 语料默认保存在 `~/.cache/hindsight/knowledge-evals`，可通过 `AMB_KNOWLEDGE_CACHE` 指定目录。Workbench 镜像默认使用 `/app/.datasets/knowledge`。断网部署时，复制准备好的缓存并将其挂载到此目录。评测只读取随仓库提供的语料或本地缓存，仍需能连接所选后端，并由后端配置适用于文本、PDF 或图像的模型。Hindsight 服务须启用 Knowledge Bank。首次准备可能需要下载数 GB 数据。修改题数只影响查询，ViDoRe 按语言、LegalBench 按合同类别应用上限。
 
-也可通过 CLI 运行 ContextBase 检索评测。先配置 `CONTEXTBASE_API_URL`、`CONTEXTBASE_API_TOKEN` 和 `CONTEXTBASE_BANK_ID`，再运行：
+也可通过 CLI 运行 ContextBase 检索评测。先配置 `CONTEXTBASE_API_URL` 和业务 Key `CONTEXTBASE_API_TOKEN`。自动创建时配置 `CONTEXTBASE_BENCH_ADMIN_TOKEN`，并将 `CONTEXTBASE_BANK_ID` 留空。复用已有 Bank 时填入其 ID。运行命令如下。
 
 ```bash
 uv run --group workbench amb run --dataset vidore-v3-markdown --split computer_science --memory contextbase-knowledge --mode retrieval --query-limit 5

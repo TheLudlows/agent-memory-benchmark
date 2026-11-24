@@ -155,7 +155,6 @@ function selectConnection() {
   const connection = selectedConnection();
   $("connection-url-row").hidden = Boolean(connection);
   $("connection-url").value = "";
-  $("connection-bank").placeholder = connection?.has_bank_mapping ? "使用已有 Bank 映射" : "已授权的测试 Bank";
   $("connection-bank").value = connection?.bank_id || "";
   $("connection-tenant").value = connection?.tenant_id || "";
   $("connection-embedding-model").value = connection?.embedding_model_id || "";
@@ -327,6 +326,12 @@ function updateForm() {
   const config = settings.backends[backend];
   const connection = connectionInput();
   const saved = selectedConnection();
+  const autoBank = backend === "contextbase-knowledge" &&
+    config.auto_bank_url === connection.api_url.replace(/\/+$/, "");
+  $("connection-bank").placeholder = autoBank ? "留空则自动创建" : saved?.has_bank_mapping ? "使用已有 Bank 映射" : "已授权的测试 Bank";
+  $("connection-bank-help").hidden = !autoBank;
+  $("connection-bank-help").textContent = autoBank
+    ? "留空时每轮创建独立 Bank 并关闭观察。业务 Key 需有新建 Bank 的读写权限。" : "";
   const descriptions = {
     "contextbase": "使用预先授权的测试 Bank。",
     "contextbase-knowledge": "使用有读写权限的测试 Bank，按原始文档来源评分。",
@@ -364,7 +369,7 @@ function updateForm() {
     : "限制题数时，仍会写入所选题目对应的会话历史。";
   const ready = $("evaluation-name").value.trim() && connection.api_url &&
     (config.key_optional || connection.api_key || usingSaved) &&
-    (!backend.startsWith("contextbase") || connection.bank_id ||
+    (!backend.startsWith("contextbase") || connection.bank_id || autoBank ||
       (backend === "contextbase" && saved?.has_bank_mapping)) &&
     (!weknora || (connection.embedding_model_id && (!requiresVlm || connection.vlm_model_id)));
   setError("config-error", splitError || modelError);

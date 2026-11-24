@@ -220,3 +220,43 @@ def test_weknora_maps_file_results_to_the_benchmark_sources(
     summary = json.loads((run_dir / "summary.json").read_text())
     assert summary["score"] == expected_score
     assert summary["scoring_failed_queries"] == int(expected_score is None)
+
+
+@pytest.mark.parametrize(("response", "expected"), [
+    (
+        httpx.Response(409, headers={"X-Request-ID": "request-123"}, json={
+            "success": False,
+            "error": {"code": 1005, "message": "Workspace conflict\nKey test-secret", "details": "internal diagnostics"},
+        }),
+        "(HTTP 409, code 1005, request ID request-123). Workspace conflict Key [redacted]",
+    ),
+    (
+        httpx.Response(409, json={"error": "Gateway rejected knowledge base creation"}),
+        "(HTTP 409). Gateway rejected knowledge base creation",
+    ),
+    (
+        httpx.Response(409, headers={"X-Request-ID": "proxy-123"}, text="<html>not diagnostic</html>"),
+        "(HTTP 409, request ID proxy-123).",
+    ),
+    (
+        httpx.Response(500, json={"error": {"code": 1004, "message": "internal diagnostics"}}),
+        "(HTTP 500).",
+    ),
+])
+def test_weknora_create_error_reports_bounded_diagnostics(weknora_http, response, expected):
+    calls = []
+
+    def respond(request):
+        calls.append((request.method, request.url.path))
+        return response
+
+    weknora_http(respond)
+    provider = weknora.WeKnoraMemoryProvider()
+    provider.initialize()
+    try:
+        with pytest.raises(RuntimeError) as error:
+            provider._create_knowledge_base()
+        assert str(error.value) == f"WeKnora create knowledge base failed {expected}"
+        assert calls == [("POST", "/api/v1/knowledge-bases")]
+    finally:
+        provider.cleanup()

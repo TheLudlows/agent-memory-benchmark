@@ -1880,7 +1880,9 @@ def test_workbench_contextbase_knowledge_connection_and_dataset(monkeypatch, tmp
     with TestClient(create_app(tmp_path / "runs"), base_url="http://localhost") as client:
         config = client.get(f"{api}/config")
         settings = config.json()
-        assert settings["backend_datasets"]["contextbase-knowledge"] == ["vidore-v3-markdown", "browsecomp-plus"]
+        assert settings["backend_datasets"]["contextbase-knowledge"] == [
+            "vidore-v3-markdown", "browsecomp-plus", "legalbench-rag",
+        ]
         assert settings["backends"]["contextbase-knowledge"]["bank_id"] == "knowledge-eval"
         assert not settings["backends"]["contextbase-knowledge"]["has_bank_mapping"]
         assert "contextbase" not in settings["backends"]
@@ -1926,7 +1928,7 @@ def test_workbench_contextbase_knowledge_auto_bank_is_per_run_and_uses_configure
     api = "/knowledge/api"
     connection = {"api_url": endpoint, "use_saved_key": True}
     payload = {
-        "name": "ContextBase knowledge run", "dataset": "vidore-v3-markdown", "split": "computer_science",
+        "name": "ContextBase LegalBench run", "dataset": "legalbench-rag", "split": "mini",
         "backend": "contextbase-knowledge", "connection": connection,
     }
     with TestClient(create_app(tmp_path / "runs"), base_url="http://localhost") as client:

@@ -181,9 +181,11 @@ ContextBase 使用预授权的测试 Bank，并以运行和题目所属的隔离
 
 在顶部选择「知识库检索」进入 `/knowledge`。这页独立保存连接和知识库评测历史，记忆评测仍从首页进入。每轮导入完整语料，等待写入完成后执行检索。AMB 无需配置回答模型或评分模型。
 
-Hindsight Knowledge 和 WeKnora 每轮创建一个评测知识库。**ContextBase** 支持 ViDoRe V3 Markdown 和 BrowseComp-Plus。配置服务端环境变量 `CONTEXTBASE_API_URL` 和 `CONTEXTBASE_BENCH_ADMIN_TOKEN` 后，选择该地址，将 **Bank ID 留空**即可为每轮自动创建独立 Bank，并在创建时关闭观察。界面填写的业务 API Key 需有新建 Bank 的读写权限，例如授予所有 Bank 读写权限的评测专用 Key。管理员 Key 只用于建 Bank，可通过 Workbench 的环境变量或项目的 `.env` 文件配置。
+Hindsight Knowledge 和 WeKnora 每轮创建一个评测知识库。**ContextBase** 支持 ViDoRe V3 Markdown、BrowseComp-Plus 和 LegalBench-RAG mini。配置服务端环境变量 `CONTEXTBASE_API_URL` 和 `CONTEXTBASE_BENCH_ADMIN_TOKEN` 后，选择该地址，将 **Bank ID 留空**即可为每轮自动创建独立 Bank，并在创建时关闭观察。界面填写的业务 API Key 需有新建 Bank 的读写权限，例如授予所有 Bank 读写权限的评测专用 Key。管理员 Key 只用于建 Bank，可通过 Workbench 的环境变量或项目的 `.env` 文件配置。
 
-填写已有 Bank ID 时，AMB 使用该 Bank 的配置，并为每轮语料设置独立标签。两种方式都通过 Retain 写入，并按 Recall 返回的来源文档 ID 评分。Bank 与评测数据会保留，运行详情显示 Bank ID。要评测原文分块检索，可由管理员把已有测试 Bank 的提取模式设为 `chunks`。
+填写已有 Bank ID 时，AMB 使用该 Bank 的配置，并为每轮语料设置独立标签。两种方式都通过 Retain 写入，再通过 Recall 检索。Bank 与评测数据会保留，运行详情显示 Bank ID。
+
+LegalBench-RAG mini 自动创建的 Bank 使用原文分块模式（`retain_extraction_mode=chunks`）。评测请求最多 4,096 Token 的原文分块，按 Recall 排名取前 5 个不同分块。同一份合同的多个分块均可参与评分，使用与 Hindsight Knowledge 相同的字符级评分器。复用已有 Bank 时，可预先将其写入模式设为 `chunks`，以直接索引原文分块。
 
 选择 WeKnora 后，填写服务地址、API Key 和该 WeKnora 服务中的 Embedding Model ID。使用平台级 API Key 时填写目标工作空间的数字 ID，AMB 会发送 `X-Tenant-ID`。使用空间级 API Key 时可留空。MIRACL-Vision 需要支持图像输入的 Embedding 模型和支持图像识别的 VLM Model ID。ViDoRe PDF 可选填 VLM Model ID。API Key 需要创建知识库、写入文档和检索的权限（`manage_kbs`、`ingest`、`retrieve`），并能访问本轮创建的知识库。ViDoRe PDF 需要 WeKnora 检索接口返回 PDF 页码来源。
 
@@ -216,6 +218,7 @@ docker compose --profile web up -d amb-web
 
 ```bash
 uv run --group workbench amb run --dataset vidore-v3-markdown --split computer_science --memory contextbase-knowledge --mode retrieval --query-limit 5
+uv run --group workbench amb run --dataset legalbench-rag --split mini --memory contextbase-knowledge --mode retrieval --query-limit 5
 ```
 
 也可通过 CLI 运行 WeKnora 检索评测。先设置 `WEKNORA_API_URL`、`WEKNORA_API_KEY`、`WEKNORA_EMBEDDING_MODEL_ID`。使用平台级 API Key 时设置 `WEKNORA_TENANT_ID`，使用图像语料时设置 `WEKNORA_VLM_MODEL_ID`。

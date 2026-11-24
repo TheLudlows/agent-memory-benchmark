@@ -84,7 +84,8 @@ def run(
         dataset not in ContextBaseKnowledgeProvider.supported_datasets or mode != "retrieval"
     ):
         raise typer.BadParameter(
-            "ContextBase knowledge retrieval supports ViDoRe V3 Markdown and BrowseComp-Plus in retrieval mode.",
+            "ContextBase knowledge retrieval supports these datasets in retrieval mode: "
+            + ", ".join(ContextBaseKnowledgeProvider.supported_datasets),
             param_hint="--memory",
         )
     if memory == "weknora" and (dataset not in WORKBENCH_KNOWLEDGE_DATASETS or mode != "retrieval"):

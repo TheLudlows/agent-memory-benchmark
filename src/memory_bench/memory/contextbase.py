@@ -158,6 +158,33 @@ class ContextBaseMemoryProvider(MemoryProvider):
                 raise ValueError(f"ContextBase run {self.ingestion_run_id} is missing {len(missing)} document(s) in {path}.")
         self._record_precision_documents(items_by_unit)
 
+    def _submit_retain(self, path: str, items: list[dict]) -> list[str]:
+        operation_id = str(uuid4())
+        try:
+            result = self._request("POST", f"{path}/memories", json={
+                "items": items, "async": True, "operation_id": operation_id,
+            })
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code != 413 or len(items) == 1:
+                raise
+            # A gateway can reject a large batch of contracts while accepting each document.
+            middle = len(items) // 2
+            return self._submit_retain(path, items[:middle]) + self._submit_retain(path, items[middle:])
+        except httpx.TransportError as exc:
+            raise RuntimeError(
+                f"ContextBase Retain submission status unknown for {path}, operation {operation_id}"
+            ) from exc
+        if result.get("success") is not True:
+            raise RuntimeError(f"ContextBase Retain failed for {path}, operation {operation_id}")
+        if result.get("items_count") != len(items):
+            raise RuntimeError(
+                f"ContextBase Retain accepted an unexpected number of items for {path}, operation {operation_id}"
+            )
+        operation_ids = result.get("operation_ids") or [result.get("operation_id")]
+        if result.get("async") is not True or not all(operation_ids):
+            raise RuntimeError(f"ContextBase Retain returned no async operation ID for {path}")
+        return operation_ids
+
     def ingest(self, documents: list[Document]) -> None:
         items_by_unit = self._items_by_unit(documents)
         for unit_id in items_by_unit:
@@ -168,25 +195,7 @@ class ContextBaseMemoryProvider(MemoryProvider):
         for unit_id, items in items_by_unit.items():
             path, _ = self._scope(unit_id)
             for start in range(0, len(items), batch_size):
-                batch = items[start:start + batch_size]
-                operation_id = str(uuid4())
-                try:
-                    result = self._request("POST", f"{path}/memories", json={
-                        "items": batch, "async": True, "operation_id": operation_id,
-                    })
-                except httpx.TransportError as exc:
-                    raise RuntimeError(
-                        f"ContextBase Retain submission status unknown for {path}, operation {operation_id}"
-                    ) from exc
-                if result.get("success") is not True:
-                    raise RuntimeError(f"ContextBase Retain failed for {path}, operation {operation_id}")
-                if result.get("items_count") != len(batch):
-                    raise RuntimeError(
-                        f"ContextBase Retain accepted an unexpected number of items for {path}, operation {operation_id}"
-                    )
-                operation_ids = result.get("operation_ids") or [result.get("operation_id")]
-                if result.get("async") is not True or not all(operation_ids):
-                    raise RuntimeError(f"ContextBase Retain returned no async operation ID for {path}")
+                operation_ids = self._submit_retain(path, items[start:start + batch_size])
                 pending.update((path, op_id) for op_id in operation_ids)
 
         deadline = time.monotonic() + self._retain_timeout
@@ -295,14 +304,15 @@ class ContextBaseMemoryProvider(MemoryProvider):
 
 
 class ContextBaseKnowledgeProvider(ContextBaseMemoryProvider):
-    """Rank benchmark source documents using scoped ContextBase Recall."""
+    """Rank benchmark source documents or passages using scoped ContextBase Recall."""
 
     name = "contextbase-knowledge"
-    description = "ContextBase Retain and Recall over a tagged text corpus, scored by source document."
+    description = "ContextBase Retain and Recall over a tagged text corpus, scored by source document or passage."
     provider = "contextbase"
     variant = "knowledge"
     supports_incremental_ingest = False
-    supported_datasets = ("vidore-v3-markdown", "browsecomp-plus")
+    supports_filters = True
+    supported_datasets = ("vidore-v3-markdown", "browsecomp-plus", "legalbench-rag")
     _unit = "knowledge"
 
     def __init__(self, *, auto_bank_id: str = "") -> None:
@@ -324,12 +334,15 @@ class ContextBaseKnowledgeProvider(ContextBaseMemoryProvider):
         super().prepare(store_dir, {self._unit}, reset=reset)
         if self._auto_bank:
             bank_id = self._auto_bank_id or knowledge_bank_id(self.ingestion_run_id)
+            config = {"enable_observations": False}
+            if self.dataset_name == "legalbench-rag":
+                config["retain_extraction_mode"] = "chunks"
             print(f"Creating ContextBase Bank {bank_id} with observations disabled.", flush=True)
             try:
                 self._request(
                     "PUT", f"v1/default/banks/{quote(bank_id, safe='')}",
                     headers={"Authorization": f"Bearer {self._admin_token}", "If-None-Match": "*"},
-                    json={"enable_observations": False},
+                    json=config,
                 )
             except httpx.HTTPStatusError as exc:
                 status = exc.response.status_code
@@ -361,26 +374,67 @@ class ContextBaseKnowledgeProvider(ContextBaseMemoryProvider):
         super().validate_ingestion(documents)
         self._source_ids = {self._retained_id(doc.id): doc.id for doc in documents}
 
+    def _source_document_id(self, result: dict) -> str:
+        source = result.get("document_id") if isinstance(result, dict) else None
+        if not isinstance(source, str) or source not in self._source_ids:
+            raise RetrievalError("ContextBase Recall returned a hit without a known benchmark source document.")
+        return self._source_ids[source]
+
+    def _ranked_chunks(self, results: list[dict], chunks: dict | None, k: int) -> list[Document]:
+        if not results and not chunks:
+            return []
+        if not isinstance(chunks, dict) or not chunks:
+            raise RetrievalError("ContextBase Recall returned hits without original chunks for LegalBench-RAG.")
+
+        ranked = {}
+        for result in results:
+            doc_id = self._source_document_id(result)
+            chunk_id = result.get("chunk_id")
+            if not isinstance(chunk_id, str) or not chunk_id:
+                raise RetrievalError("ContextBase Recall returned a LegalBench-RAG hit without a source chunk ID.")
+            # The chunk budget can omit lower-ranked chunks, and several facts can point to one chunk.
+            if chunk_id not in chunks or chunk_id in ranked:
+                continue
+            chunk = chunks[chunk_id]
+            text = chunk.get("text") if isinstance(chunk, dict) else None
+            if not isinstance(text, str) or not text.strip():
+                raise RetrievalError("ContextBase Recall returned an empty or invalid LegalBench-RAG chunk.")
+            ranked[chunk_id] = Document(id=doc_id, content=text, source_ids=[doc_id])
+            if len(ranked) == k:
+                break
+        if not ranked:
+            raise RetrievalError("ContextBase Recall did not link any LegalBench-RAG hits to the returned chunks.")
+        return list(ranked.values())
+
     def retrieve(self, query: str, k: int = 10, user_id: str | None = None,
-                 query_timestamp: str | None = None) -> tuple[list[Document], dict]:
+                 query_timestamp: str | None = None, filters: dict | None = None) -> tuple[list[Document], dict]:
         if not self._source_ids:
             raise RetrievalError("ContextBase has no completed benchmark ingest.")
+        legalbench = self.dataset_name == "legalbench-rag"
+        include = {"entities": None}
+        max_tokens = self._max_tokens
+        if legalbench:
+            chunk_budget = (filters or {}).get("max_tokens", 4096)
+            if k <= 0 or chunk_budget <= 0:
+                return [], {}
+            include["chunks"] = {"max_tokens": chunk_budget}
+            max_tokens = max(max_tokens, chunk_budget)
+
         path, tags = self._scope(self._unit)
         raw = self._request("POST", f"{path}/memories/recall", json={
-            "query": query[:1900], "budget": "high", "max_tokens": self._max_tokens,
-            "include": {"entities": None}, "types": ["world", "experience"],
+            "query": query[:1900], "budget": "high", "max_tokens": max_tokens,
+            "include": include, "types": ["world", "experience"],
             "tags": tags, "tags_match": "all_strict",
         })
         results = raw.get("results")
         if not isinstance(results, list):
             raise RetrievalError("ContextBase Recall did not return a result list.")
+        if legalbench:
+            return self._ranked_chunks(results, raw.get("chunks"), k), raw
 
         ranked = {}
         for result in results:
-            source = result.get("document_id") if isinstance(result, dict) else None
-            if not isinstance(source, str) or source not in self._source_ids:
-                raise RetrievalError("ContextBase Recall returned a hit without a known benchmark source document.")
-            doc_id = self._source_ids[source]
+            doc_id = self._source_document_id(result)
             text = result.get("text")
             if not isinstance(text, str):
                 raise RetrievalError("ContextBase Recall returned an invalid hit text.")

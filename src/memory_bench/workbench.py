@@ -201,14 +201,18 @@ class RunManager:
                     models, model_env = self.models.for_run(selection.dataset, needs_judge=selection.dataset not in CHOICE_DATASETS)
             except ValueError as exc:
                 raise HTTPException(422, str(exc)) from exc
+            auto_bank = selection.backend == "contextbase-knowledge" and not connection.bank_id
             try:
-                backend_config = self.connections.remember(selection.backend, connection)
+                if auto_bank:
+                    # An administrator credential entered for this run stays out of saved connections.
+                    backend_config = self.connections.public()[selection.backend]
+                else:
+                    backend_config = self.connections.remember(selection.backend, connection)
             except OSError as exc:
                 raise HTTPException(500, "无法保存本轮连接，请检查配置目录。") from exc
             run_id = uuid4().hex
             directory = self.root / run_id
             directory.mkdir(mode=0o700)
-            auto_bank = selection.backend == "contextbase-knowledge" and not connection.bank_id
             target = {"api_url": connection.api_url, "bank_id": connection.bank_id}
             if auto_bank:
                 target.update(bank_id=knowledge_bank_id(run_id), auto_bank=True)
@@ -232,8 +236,7 @@ class RunManager:
             }
             if selection.is_knowledge:
                 env["AMB_KNOWLEDGE_OFFLINE"] = "1"
-            if not auto_bank:
-                env.pop(BENCH_ADMIN_TOKEN_ENV, None)
+            env.pop(BENCH_ADMIN_TOKEN_ENV, None)
             try:
                 process = subprocess.Popen(
                     [sys.executable, "-m", "memory_bench.workbench_worker", str(directory)],

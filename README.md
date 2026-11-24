@@ -181,9 +181,9 @@ ContextBase 使用预授权的测试 Bank，并以运行和题目所属的隔离
 
 在顶部选择「知识库检索」进入 `/knowledge`。这页独立保存连接和知识库评测历史，记忆评测仍从首页进入。每轮导入完整语料，等待写入完成后执行检索。AMB 无需配置回答模型或评分模型。
 
-Hindsight Knowledge 和 WeKnora 每轮创建一个评测知识库。**ContextBase** 支持 ViDoRe V3 Markdown、BrowseComp-Plus 和 LegalBench-RAG mini。配置服务端环境变量 `CONTEXTBASE_API_URL` 和 `CONTEXTBASE_BENCH_ADMIN_TOKEN` 后，选择该地址，将 **Bank ID 留空**即可为每轮自动创建独立 Bank，并在创建时关闭观察。界面填写的业务 API Key 需有新建 Bank 的读写权限，例如授予所有 Bank 读写权限的评测专用 Key。管理员 Key 只用于建 Bank，可通过 Workbench 的环境变量或项目的 `.env` 文件配置。
+Hindsight Knowledge 和 WeKnora 每轮创建一个评测知识库。**ContextBase** 支持 ViDoRe V3 Markdown、BrowseComp-Plus 和 LegalBench-RAG mini。在 Workbench 填写 **API 地址**，在 **API Key** 栏填入有新建 Bank 读写权限的 ContextBase 管理员 Key，并将 **Bank ID 留空**。AMB 使用这把 Key 为本轮创建独立 Bank、关闭观察，再导入语料和检索。管理员 Key 仅用于本轮，界面可直接填写全部连接信息。
 
-填写已有 Bank ID 时，AMB 使用该 Bank 的配置，并为每轮语料设置独立标签。两种方式都通过 Retain 写入，再通过 Recall 检索。Bank 与评测数据会保留，运行详情显示 Bank ID。
+填写已有 Bank ID 时，使用对此 Bank 有读写权限的业务 Key。AMB 使用该 Bank 的配置，并为每轮语料设置独立标签。两种方式都通过 Retain 写入，再通过 Recall 检索。Bank 与评测数据会保留，运行详情显示 Bank ID。
 
 LegalBench-RAG mini 自动创建的 Bank 使用原文分块模式（`retain_extraction_mode=chunks`）。评测请求最多 4,096 Token 的原文分块，按 Recall 排名取前 5 个不同分块。同一份合同的多个分块均可参与评分，使用与 Hindsight Knowledge 相同的字符级评分器。复用已有 Bank 时，可预先将其写入模式设为 `chunks`，以直接索引原文分块。
 

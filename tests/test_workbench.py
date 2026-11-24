@@ -1892,7 +1892,7 @@ def test_workbench_contextbase_knowledge_connection_and_dataset(monkeypatch, tmp
         assert client.post(f"{api}/runs", json={**payload, "dataset": "vidore-v3-pdf"}).status_code == 422
         missing = client.post(f"{api}/runs", json={**payload, "connection": {**connection, "bank_id": ""}})
         assert missing.status_code == 422
-        assert "Bank ID" in missing.json()["detail"]
+        assert "管理员 Key" in missing.json()["detail"]
         assert not environments
 
         response = client.post(f"{api}/runs", json=payload)
@@ -1907,54 +1907,61 @@ def test_workbench_contextbase_knowledge_connection_and_dataset(monkeypatch, tmp
         assert key not in response.text and key not in client.get(f"{api}/runs").text
 
 
-def test_workbench_contextbase_knowledge_auto_bank_is_per_run_and_uses_configured_endpoint(
+def test_workbench_contextbase_auto_bank_uses_request_credentials_without_saving_them(
     monkeypatch, tmp_path, private_workbench_config,
 ):
-    endpoint = "https://contextbase.example/tenant-api"
     admin_token = "fake-administrator-token"
-    monkeypatch.setenv("CONTEXTBASE_API_URL", endpoint + "/")
-    monkeypatch.setenv("CONTEXTBASE_API_TOKEN", "fake-business-token")
-    monkeypatch.setenv("CONTEXTBASE_BENCH_ADMIN_TOKEN", admin_token)
-    monkeypatch.delenv("CONTEXTBASE_BANK_ID", raising=False)
+    for name in ("CONTEXTBASE_API_URL", "CONTEXTBASE_API_TOKEN", "CONTEXTBASE_BENCH_ADMIN_TOKEN", "CONTEXTBASE_BANK_ID"):
+        monkeypatch.delenv(name, raising=False)
     monkeypatch.setattr("memory_bench.workbench._dataset_error", lambda *_: None)
 
     environments = []
 
     def launch(*_, env, **__):
         environments.append(env)
-        return SimpleNamespace(stdout=io.StringIO(), wait=lambda timeout=None: 0, poll=lambda: 0)
+        return SimpleNamespace(
+            stdout=io.StringIO(f"Worker log: {env['CONTEXTBASE_API_TOKEN']}\n"),
+            wait=lambda timeout=None: 0, poll=lambda: 0,
+        )
 
     monkeypatch.setattr("memory_bench.workbench.subprocess.Popen", launch)
     api = "/knowledge/api"
-    connection = {"api_url": endpoint, "use_saved_key": True}
     payload = {
         "name": "ContextBase LegalBench run", "dataset": "legalbench-rag", "split": "mini",
-        "backend": "contextbase-knowledge", "connection": connection,
+        "backend": "contextbase-knowledge",
     }
+    endpoint = "https://contextbase.example/tenant-api"
     with TestClient(create_app(tmp_path / "runs"), base_url="http://localhost") as client:
         config = client.get(f"{api}/config")
-        assert admin_token not in config.text
         backend = config.json()["backends"]["contextbase-knowledge"]
-        assert backend["auto_bank_url"] == endpoint and not backend["missing"]
-
-        other = {**payload, "connection": {"api_url": "https://other.example/tenant-api", "api_key": "other-key"}}
-        assert client.post(f"{api}/runs", json=other).status_code == 422
+        assert backend["missing"] == ["API 地址", "API Key"]
+        missing_key = client.post(f"{api}/runs", json={**payload, "connection": {"api_url": endpoint}})
+        assert missing_key.status_code == 422
+        assert "管理员 Key" in missing_key.json()["detail"]
         assert not environments
 
-        for _ in range(2):
-            response = client.post(f"{api}/runs", json=payload)
+        for address in (endpoint, "https://other.example/tenant-api"):
+            connection = {"api_url": address + "/", "api_key": admin_token}
+            response = client.post(f"{api}/runs", json={**payload, "connection": connection})
             _, job = await_result(client, response, api=api)
-            assert job["target"] == {"api_url": endpoint, "bank_id": f"amb_rag_{job['id']}", "auto_bank": True}
-            assert response.json()["backend_config"]["bank_id"] == ""
+            assert job["target"] == {"api_url": address, "bank_id": f"amb_rag_{job['id']}", "auto_bank": True}
+            assert response.json()["backend_config"]["connections"] == []
             assert admin_token not in response.text
-            assert environments[-1]["CONTEXTBASE_BENCH_ADMIN_TOKEN"] == admin_token
+            assert "[redacted]" in job["log"] and admin_token not in job["log"]
+            assert environments[-1]["CONTEXTBASE_API_URL"] == address
+            assert environments[-1]["CONTEXTBASE_API_TOKEN"] == admin_token
+            assert "CONTEXTBASE_BENCH_ADMIN_TOKEN" not in environments[-1]
             assert environments[-1]["CONTEXTBASE_BANK_ID"] == ""
+            monkeypatch.setenv("CONTEXTBASE_BENCH_ADMIN_TOKEN", "unused-server-env-key")
         runs = client.get(f"{api}/runs").json()
         assert len({job["target"]["bank_id"] for job in runs}) == 2
 
-        manual = {**payload, "connection": {**connection, "bank_id": "existing-bank"}}
+        manual = {**payload, "connection": {
+            "api_url": endpoint, "api_key": "fake-business-token", "bank_id": "existing-bank",
+        }}
         _, job = await_result(client, client.post(f"{api}/runs", json=manual), api=api)
         assert job["target"] == {"api_url": endpoint, "bank_id": "existing-bank"}
         assert "CONTEXTBASE_BENCH_ADMIN_TOKEN" not in environments[-1]
         assert environments[-1]["CONTEXTBASE_BANK_ID"] == "existing-bank"
+        assert environments[-1]["CONTEXTBASE_API_TOKEN"] == "fake-business-token"
     assert all(admin_token not in path.read_text(encoding="utf-8") for path in private_workbench_config.glob("*.json"))

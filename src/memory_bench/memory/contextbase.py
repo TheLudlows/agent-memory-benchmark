@@ -319,11 +319,14 @@ class ContextBaseKnowledgeProvider(ContextBaseMemoryProvider):
         bank_id = os.environ.get("CONTEXTBASE_BANK_ID", "").strip()
         self._auto_bank = not bank_id
         self._auto_bank_id = auto_bank_id
-        self._admin_token = os.environ.get(BENCH_ADMIN_TOKEN_ENV, "").strip() if self._auto_bank else ""
-        if self._auto_bank and not self._admin_token:
-            raise ValueError(f"Set CONTEXTBASE_BANK_ID or {BENCH_ADMIN_TOKEN_ENV} for ContextBase knowledge retrieval.")
-        if self._admin_token and self._admin_token == os.environ.get("CONTEXTBASE_API_TOKEN", "").strip():
-            raise ValueError("ContextBase auto Bank creation requires separate administrator and business API keys.")
+        self._admin_token = ""
+        if self._auto_bank and not auto_bank_id:
+            # CLI runs can still create with a separate administrator credential.
+            self._admin_token = os.environ.get(BENCH_ADMIN_TOKEN_ENV, "").strip()
+            if not self._admin_token:
+                raise ValueError(f"Set CONTEXTBASE_BANK_ID or {BENCH_ADMIN_TOKEN_ENV} for ContextBase knowledge retrieval.")
+            if self._admin_token == os.environ.get("CONTEXTBASE_API_TOKEN", "").strip():
+                raise ValueError("ContextBase auto Bank creation requires separate administrator and business API keys.")
         super().__init__(single_bank_id=bank_id)
         self._source_ids: dict[str, str] = {}
 
@@ -337,16 +340,21 @@ class ContextBaseKnowledgeProvider(ContextBaseMemoryProvider):
             config = {"enable_observations": False}
             if self.dataset_name == "legalbench-rag":
                 config["retain_extraction_mode"] = "chunks"
+            headers = {"If-None-Match": "*"}
+            if self._admin_token:
+                headers["Authorization"] = f"Bearer {self._admin_token}"
             print(f"Creating ContextBase Bank {bank_id} with observations disabled.", flush=True)
             try:
                 self._request(
                     "PUT", f"v1/default/banks/{quote(bank_id, safe='')}",
-                    headers={"Authorization": f"Bearer {self._admin_token}", "If-None-Match": "*"},
-                    json=config,
+                    headers=headers, json=config,
                 )
             except httpx.HTTPStatusError as exc:
                 status = exc.response.status_code
-                details = f" Check the administrator API key in {BENCH_ADMIN_TOKEN_ENV}." if status in {401, 403} else ""
+                details = ""
+                if status in {401, 403}:
+                    source = "the Workbench API Key field" if self._auto_bank_id else BENCH_ADMIN_TOKEN_ENV
+                    details = f" Check the ContextBase administrator API key in {source}."
                 raise RuntimeError(f"ContextBase could not create Bank {bank_id} (HTTP {status}).{details}") from exc
             self._bank_id = bank_id
 
@@ -364,7 +372,7 @@ class ContextBaseKnowledgeProvider(ContextBaseMemoryProvider):
         except httpx.HTTPStatusError as exc:
             if self._auto_bank and exc.response.status_code in {401, 403}:
                 raise RuntimeError(
-                    f"The ContextBase business API key needs read/write access to the newly created Bank {self._bank_id}."
+                    f"The ContextBase API key needs read/write access to the newly created Bank {self._bank_id}."
                 ) from exc
             raise
         self._source_ids = {self._retained_id(doc.id): doc.id for doc in documents}

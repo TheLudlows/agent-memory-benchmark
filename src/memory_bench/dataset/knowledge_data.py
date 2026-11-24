@@ -1,7 +1,7 @@
 """The corpora the knowledge-bank suites write into a bank, downloaded once into a cache.
 
 Nothing here is committed: every dataset is public, several are gigabytes, and each is
-fetched on first use into ``$AMB_KNOWLEDGE_CACHE`` (default
+read from the repository bundle or fetched on first use into ``$AMB_KNOWLEDGE_CACHE`` (default
 ``~/.cache/hindsight/knowledge-evals``, the cache Hindsight's own evals use), outside the repo. A ``.complete`` marker per
 dataset makes a half-finished download start over instead of scoring a partial corpus.
 
@@ -21,6 +21,8 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal
+
+from ..data_files import data_path, read_json
 
 #: Shared with Hindsight's own knowledge evals, so a corpus downloaded by either is reused.
 CACHE = Path(
@@ -117,7 +119,15 @@ def _require_download_allowed(path: Path) -> None:
         raise FileNotFoundError(f"Knowledge corpus is not prepared: {path}. Run amb prepare-knowledge first.")
 
 
+def _vidore_markdown_bundle(task: str) -> Path:
+    return data_path("offline", "vidore-v3-markdown", f"{task}.json.xz")
+
+
 def workbench_cache_files(dataset: str, split: str) -> tuple[Path, ...]:
+    if dataset == "vidore-v3-markdown":
+        bundle = _vidore_markdown_bundle(split)
+        if bundle.is_file():
+            return (bundle,)
     if dataset in {"vidore-v3-markdown", "vidore-v3-pdf"}:
         base = CACHE / "vidore"
         variant = "markdown" if dataset == "vidore-v3-markdown" else "documents"
@@ -211,17 +221,25 @@ def vidore(task: str, *, queries_per_language: int | None) -> RankedSuite:
     the same order), so a subset still compares languages on equal questions.
     """
     out = _prepared(CACHE / "vidore" / task, lambda d: _build_vidore(task, d))
-    qrels = _read_qrels(out / "qrels.tsv")
+    queries = _vidore_queries(
+        _read_jsonl(out / "queries.jsonl"), _read_qrels(out / "qrels.tsv"), queries_per_language,
+    )
+    items = tuple(FileItem(id=p.stem, path=p) for p in sorted((out / "pages").iterdir()))
+    return RankedSuite(name=f"vidore_{task}", items=items, queries=queries)
+
+
+def _vidore_queries(
+    rows: list[dict[str, str]], qrels: dict[str, dict[str, int]], limit: int | None,
+) -> tuple[RankedQuery, ...]:
     taken: dict[str, int] = {}
     queries = []
-    for row in _read_jsonl(out / "queries.jsonl"):
+    for row in rows:
         lang = row["lang"]
-        if row["id"] not in qrels or (queries_per_language is not None and taken.get(lang, 0) >= queries_per_language):
+        if row["id"] not in qrels or (limit is not None and taken.get(lang, 0) >= limit):
             continue
         taken[lang] = taken.get(lang, 0) + 1
         queries.append(RankedQuery(id=row["id"], text=row["text"], group=lang, relevant=qrels[row["id"]]))
-    items = tuple(FileItem(id=p.stem, path=p) for p in sorted((out / "pages").iterdir()))
-    return RankedSuite(name=f"vidore_{task}", items=items, queries=tuple(queries))
+    return tuple(queries)
 
 
 def _build_vidore_documents(task: str, out: Path) -> None:
@@ -273,29 +291,36 @@ def vidore_documents(task: str, *, queries_per_language: int | None) -> RankedSu
     return RankedSuite(name=f"vidore_{task}_documents", items=items, queries=pages.queries, page_ids=page_ids)
 
 
-def vidore_markdown(task: str, *, queries_per_language: int | None) -> RankedSuite:
-    """``vidore`` on the pages' OCR markdown the dataset ships (ViDoRe's "Markdown" track, the one
-    Mixedbread and the text embedders report): one text document per page, same queries."""
+def _build_vidore_markdown(task: str, out: Path) -> None:
     import pyarrow.parquet as pq
     from huggingface_hub import HfFileSystem
 
-    def build(out: Path) -> None:
-        fs = HfFileSystem()
-        with (out / "pages.jsonl").open("w") as f:
-            for path in sorted(fs.glob(f"datasets/vidore/vidore_v3_{task}/corpus/*.parquet")):
-                with fs.open(path, block_size=2**20) as handle:  # column read: the page images stay remote
-                    for row in pq.ParquetFile(handle).read(columns=["corpus_id", "markdown"]).to_pylist():
-                        f.write(json.dumps({"id": f"corpus-test-{row['corpus_id']}", "text": row["markdown"]}) + "\n")
+    fs = HfFileSystem()
+    with (out / "pages.jsonl").open("w") as f:
+        for path in sorted(fs.glob(f"datasets/vidore/vidore_v3_{task}/corpus/*.parquet")):
+            with fs.open(path, block_size=2**20) as handle:  # column read: the page images stay remote
+                for row in pq.ParquetFile(handle).read(columns=["corpus_id", "markdown"]).to_pylist():
+                    f.write(json.dumps({"id": f"corpus-test-{row['corpus_id']}", "text": row["markdown"]}) + "\n")
 
-    pages = vidore(task, queries_per_language=queries_per_language)
-    out = _prepared(CACHE / "vidore" / f"{task}_markdown", build)
+
+def vidore_markdown(task: str, *, queries_per_language: int | None) -> RankedSuite:
+    """One OCR Markdown text document per page, with the same queries as the PDF track."""
+    bundle = _vidore_markdown_bundle(task)
+    if bundle.is_file():
+        contents = read_json(bundle)
+        rows = contents["pages"]
+        queries = _vidore_queries(contents["queries"], contents["qrels"], queries_per_language)
+    else:
+        queries = vidore(task, queries_per_language=queries_per_language).queries
+        out = _prepared(CACHE / "vidore" / f"{task}_markdown", lambda d: _build_vidore_markdown(task, d))
+        rows = _read_jsonl(out / "pages.jsonl")
     items = tuple(
         TextItem(id=row["id"], text=row["text"], filename=f"{row['id']}.md")
-        for row in _read_jsonl(out / "pages.jsonl")
-        # A page with no text at all (a photo, a blank) can never match as markdown; the text ingest refuses it.
+        for row in rows
+        # A blank page has no searchable Markdown, and the text ingest refuses it.
         if (row["text"] or "").strip()
     )
-    return RankedSuite(name=f"vidore_{task}_markdown", items=items, queries=pages.queries)
+    return RankedSuite(name=f"vidore_{task}_markdown", items=items, queries=queries)
 
 
 # --- MIRACL-Vision: Wikipedia page images in 18 languages ---------------------------------------

@@ -6,7 +6,7 @@ import socket
 import pytest
 
 from memory_bench.dataset import get_dataset
-from memory_bench.dataset import _cache, beam, locomo, longmemeval
+from memory_bench.dataset import _cache, beam, knowledge_data, locomo, longmemeval
 from memory_bench.utils import _enc, count_tokens
 
 
@@ -41,6 +41,23 @@ def test_workbench_bundles_load_without_network(offline, name, split, count):
     if name == "beam":
         assert all(doc.timestamp and doc.context for doc in documents)
         assert len(documents) > 1
+
+
+def test_vidore_computer_science_markdown_loads_without_network_or_cache(offline, monkeypatch, tmp_path):
+    monkeypatch.setattr(knowledge_data, "CACHE", tmp_path)
+    monkeypatch.setenv("AMB_KNOWLEDGE_OFFLINE", "1")
+    dataset = get_dataset("vidore-v3-markdown")
+    split = "computer_science"
+
+    queries = dataset.load_queries(split)
+    documents = dataset.load_documents(split)
+    assert len({query.id for query in queries}) == len(queries) == 1290
+    assert len({doc.id for doc in documents}) == len(documents) == 1358
+    assert all(query.gold_ids for query in queries)
+    assert all(doc.content.strip() for doc in documents)
+    assert all(path.is_file() for path in knowledge_data.workbench_cache_files(dataset.name, split))
+    assert any(not path.is_file() for path in knowledge_data.workbench_cache_files("vidore-v3-pdf", split))
+    assert not list(tmp_path.iterdir())
 
 
 def test_tokenizer_uses_bundled_ranks_without_cache(offline, monkeypatch, tmp_path):

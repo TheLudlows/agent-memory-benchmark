@@ -323,6 +323,7 @@ function createModelEditor(role) {
 function updateForm() {
   if (!settings) return;
   const backend = $("backend").value;
+  const dataset = $("dataset").value;
   const config = settings.backends[backend];
   const connection = connectionInput();
   const saved = selectedConnection();
@@ -334,7 +335,9 @@ function updateForm() {
     ? "留空时每轮创建独立 Bank 并关闭观察。业务 Key 需有新建 Bank 的读写权限。" : "";
   const descriptions = {
     "contextbase": "使用预先授权的测试 Bank。",
-    "contextbase-knowledge": "使用有读写权限的测试 Bank，按原始文档来源评分。",
+    "contextbase-knowledge": dataset === "legalbench-rag"
+      ? "按前 5 条原文分块的证据字符覆盖率评分。复用已有 Bank 时可预先设为原文分块模式。"
+      : "使用有读写权限的测试 Bank，按原始文档来源评分。",
     "mem0-cloud": "使用 Mem0 Cloud 兼容 API。",
     "hindsight-http": "连接已启动的 Hindsight API。",
     "hindsight-knowledge": "连接已启用知识库的 Hindsight API。每轮创建一个评测知识库。",
@@ -346,7 +349,6 @@ function updateForm() {
   const usingSaved = saved?.has_key && $("connection-reuse").checked;
   const splitError = settings.split_errors?.[$("dataset").value]?.[$("split").value];
   for (const editor of Object.values(modelEditors)) updateModelEditor(editor);
-  const dataset = $("dataset").value;
   const weknora = backend === "weknora";
   const requiresVlm = weknora && dataset === "miracl-vision";
   $("connection-embedding-model").required = weknora;

@@ -6,7 +6,7 @@ from typer.testing import CliRunner
 
 from memory_bench import cli, llm, runner
 from memory_bench.dataset import knowledge_data as data
-from memory_bench.dataset.knowledge import BrowseCompPlusDataset, VidoreMarkdownDataset
+from memory_bench.dataset.knowledge import BrowseCompPlusDataset, LegalBenchRagDataset, VidoreMarkdownDataset
 from memory_bench.dataset.locomo import LoComoDataset
 from memory_bench.memory import get_memory_provider
 from memory_bench.memory import contextbase
@@ -319,6 +319,98 @@ def test_contextbase_knowledge_worker_scores_original_documents(
     assert summary["score_type"] == "ndcg@10"
     assert summary["ingested_docs"] == 2
     assert summary["answer_llm"] is None and summary["judge_llm"] is None
+
+
+@pytest.mark.parametrize("include_chunks", [True, False])
+def test_contextbase_legalbench_scores_ranked_original_chunks(monkeypatch, tmp_path, include_chunks):
+    evidence = ["Disclosure requires notice.", "Return all copies.", "The agreement lasts two years."]
+    distractors = ["First distractor.", "Second distractor.", "Third distractor."]
+    related = "\n\n".join(evidence)
+    unrelated = "\n\n".join(distractors)
+    monkeypatch.setattr(LegalBenchRagDataset, "_load", lambda self, split: data.RankedSuite(
+        name="legalbench",
+        items=(
+            data.TextItem(id="contract-a", text=related, filename="a.txt"),
+            data.TextItem(id="contract-b", text=unrelated, filename="b.txt"),
+        ),
+        queries=(data.RankedQuery(id="q1", text="What conditions apply?", group="MAUD", relevant={"contract-a": 1}),),
+        spans={"q1": [
+            ("contract-a", related.index(text), related.index(text) + len(text)) for text in evidence
+        ]},
+    ))
+    run_id = "09a6147e16b94919a908f98863235a51c"
+    bank_id = f"amb_rag_{run_id}"
+    retained = {}
+    submitted, completed = set(), set()
+
+    def handler(request):
+        path = request.url.path.removeprefix(f"/tenant-api/v1/default/banks/{bank_id}")
+        if request.method == "PUT":
+            assert path == ""
+            assert request.headers["Authorization"] == "Bearer test-admin-token"
+            assert json.loads(request.content) == {"enable_observations": False, "retain_extraction_mode": "chunks"}
+            return httpx.Response(200, json={"bank_id": bank_id})
+        assert request.headers["Authorization"] == "Bearer test-token"
+        if path == "/memories":
+            assert request.method == "POST"
+            body = json.loads(request.content)
+            if len(body["items"]) > 1:
+                return httpx.Response(413)
+            item = body["items"][0]
+            retained[item["metadata"]["doc_id"]] = item
+            operation_id = body["operation_id"]
+            assert operation_id not in submitted
+            submitted.add(operation_id)
+            return httpx.Response(200, json={
+                "success": True, "async": True, "items_count": 1, "operation_id": operation_id,
+            })
+        if path.startswith("/operations/"):
+            assert request.method == "GET"
+            completed.add(path.removeprefix("/operations/"))
+            return httpx.Response(200, json={"status": "completed"})
+        assert request.method == "POST" and path == "/memories/recall"
+        assert len(submitted) == 2 and completed == submitted
+        assert {item["content"] for item in retained.values()} == {related, unrelated}
+        body = json.loads(request.content)
+        assert body["include"] == {"entities": None, "chunks": {"max_tokens": 4096}}
+        assert body["tags_match"] == "all_strict"
+        assert body["tags"] == retained["contract-a"]["tags"] == retained["contract-b"]["tags"]
+        ranked = [
+            ("contract-a", "a-1", evidence[0]),
+            ("contract-a", "a-1", evidence[0]),
+            ("contract-b", "b-1", distractors[0]),
+            ("contract-b", "b-2", distractors[1]),
+            ("contract-b", "b-3", distractors[2]),
+            ("contract-a", "a-2", evidence[1]),
+            ("contract-a", "a-3", evidence[2]),
+        ]
+        return httpx.Response(200, json={
+            "results": [
+                {"document_id": retained[source]["document_id"], "chunk_id": chunk, "text": "An extracted fact."}
+                for source, chunk, _ in ranked
+            ],
+            "chunks": {chunk: {"text": text} for _, chunk, text in reversed(ranked)} if include_chunks else None,
+        })
+
+    _configure_contextbase(monkeypatch, handler)
+    monkeypatch.delenv("CONTEXTBASE_BANK_ID")
+    monkeypatch.setenv("CONTEXTBASE_BENCH_ADMIN_TOKEN", "test-admin-token")
+    (tmp_path / "run.json").write_text(json.dumps({
+        "id": run_id, "name": "ContextBase contract evidence",
+        "selection": {"backend": "contextbase-knowledge", "dataset": "legalbench-rag", "split": "mini", "query_limit": 1},
+        "target": {"bank_id": bank_id, "auto_bank": True},
+        "models": {},
+    }), encoding="utf-8")
+
+    assert run(tmp_path) == (0 if include_chunks else SCORING_INCOMPLETE_EXIT_CODE)
+    summary = json.loads((tmp_path / "summary.json").read_text())
+    assert summary["score_type"] == "recall@5"
+    assert summary["ingested_docs"] == 2
+    if include_chunks:
+        assert summary["score"] == pytest.approx((len(evidence[0]) + len(evidence[1])) / sum(map(len, evidence)))
+    else:
+        assert summary["score"] is None
+        assert summary["scoring_failed_queries"] == 1
 
 
 def test_contextbase_knowledge_auto_bank_requires_fresh_ingestion_and_admin_access(monkeypatch, tmp_path):
